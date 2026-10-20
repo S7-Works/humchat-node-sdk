@@ -1,0 +1,67 @@
+{
+  "name": "@humchat/node",
+  "version": "0.1.0-alpha.6",
+  "description": "HumChat backend SDK: typed HTTP and real-time preview with caller-supplied authentication",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/S7-Works/humchat-node-sdk.git"
+  },
+  "homepage": "https://github.com/S7-Works/humchat-node-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/S7-Works/humchat-node-sdk/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "examples",
+    "docs"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:integration": "node --test test/integration/*.test.mjs",
+    "test:package": "node --test test/package/*.test.mjs",
+    "test": "npm run build && npm run test:unit && npm run test:integration && npm run test:release && npm run test:package",
+    "prepack": "npm run build",
+    "test:release": "node --test test/release/*.test.mjs",
+    "release:prepare": "node scripts/prepare-release.mjs"
+  },
+  "dependencies": {
+    "ulid": "3.0.2",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "dts-bundle-generator": "9.5.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
