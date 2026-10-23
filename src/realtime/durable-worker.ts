@@ -30,6 +30,7 @@ export class DurableChannelWorker implements SubscriptionOwner {
   #storeWork: Promise<unknown> | undefined;
   #consumerWork: Promise<void> | undefined;
   #deliveryEnded = new AbortController();
+  #retiring = false;
   #refreshRequested = false;
   #resyncRequested = false;
   #consumer: { handle: ChannelSubscription; handler: DurableConsumer; options: ConsumerOptions; scope?: PersistenceScope } | undefined;
@@ -61,17 +62,43 @@ export class DurableChannelWorker implements SubscriptionOwner {
     if (!this.handles.size) { this.stop(); this.manager.remove(this.channelId, this); }
     else if (this.#consumer?.handle === handle && this.status !== 'closed') this.block(new AbortError('Acknowledged consumer closed; replace the channel subscription'));
   }
+  /** Drain acknowledged work before an inbox can automatically replace this worker. */
+  async retire(handle: ChannelSubscription, signal: AbortSignal): Promise<void> {
+    const consumer = this.#consumerWork;
+    const store = this.#storeWork;
+    const pump = this.#pump?.catch(() => {});
+    // Closing cancels delivery, but an application's promise may still be cleaning up.
+    // Keep its original deadline alive while waiting for actual settlement.
+    this.#retiring = true;
+    const storageBudget = budget(this.manager.config.retry.totalTimeoutMs, [signal]);
+    const storage = store ? raceSignal(store, storageBudget.signal).catch(() => {
+      if (signal.aborted) throw aborted(signal);
+      throw new PersistenceError('Checkpoint storage did not settle; inbox replacement stopped');
+    }).then(result => {
+      if (result === false) throw new ConflictError('Checkpoint changed concurrently; channel ownership was lost');
+    }) : Promise.resolve();
+    const settled = Promise.all([consumer, storage, pump]);
+    try {
+      await handle.close();
+      await raceSignal(settled, signal);
+    } finally {
+      storageBudget.dispose();
+      this.#deliveryEnded.abort(new AbortError('Subscription is closed'));
+    }
+  }
   start(): void { if (this.status === 'idle') void this.connect(); }
   stop(): void {
     if (this.status === 'closed') return;
     this.invalidate(); this.setStatus('closed');
     this.#lease?.close();
-    this.#deliveryEnded.abort(new AbortError('Subscription is closed'));
+    if (!this.#retiring) this.#deliveryEnded.abort(new AbortError('Subscription is closed'));
     for (const handle of [...this.handles]) { handle.rejectReady(new AbortError('Subscription is closed')); void handle.close(); }
   }
   block(error: HumChatError): void {
     if (this.status === 'closed' || this.status === 'blocked') return;
-    this.invalidate(); this.setStatus('blocked'); this.#deliveryEnded.abort(error); this.notify('error', error);
+    this.invalidate(); this.setStatus('blocked');
+    if (!this.#retiring) this.#deliveryEnded.abort(error);
+    this.notify('error', error);
     this.#lease?.close();
     if (error instanceof AuthenticationError || error instanceof SessionRevokedError) this.notify('authRequired', { channelId: this.channelId, error });
     for (const handle of this.handles) handle.rejectReady(error);

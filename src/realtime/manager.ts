@@ -88,6 +88,11 @@ export class RealtimeClient {
   /** @internal */ remove(channelId: string, worker: ChannelWorker | DurableChannelWorker): void {
     if (this.#channels.get(channelId) === worker) { this.#channels.delete(channelId); this.#starts.delete(channelId); }
   }
+  /** @internal */ async retire(handle: ChannelSubscription, signal: AbortSignal): Promise<void> {
+    const worker = this.#channels.get(handle.channelId);
+    if (worker instanceof DurableChannelWorker && worker.handles.has(handle)) await worker.retire(handle, signal);
+    else await handle.close();
+  }
   /** @internal */ revoke(reason: string): void {
     this.#revoked = true;
     this.sessions.revoke();

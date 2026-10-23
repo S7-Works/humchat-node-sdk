@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed automatic inbox conversation rejoining while a cancelled handler or checkpoint write is still pending. Discovery now waits for bounded settlement before replacement, preventing overlapping callbacks and checkpoint conflicts. Explicit watcher/client shutdown remains cancellable.
+
 ## 0.1.0-alpha.8 - 2026-10-23 (local review preview; unpublished)
 
 This preview versions the SDK-key work from Phases 2–7. It remains `private: true` and `UNLICENSED`; no npm release is published. Production messaging/app acceptance, delegated-admin enforcement, the server expiry companion and pilot acceptance remain open.

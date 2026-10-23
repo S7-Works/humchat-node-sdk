@@ -99,6 +99,8 @@ Ordering is per channel; different channels progress independently. An event con
 
 Rejected/timed-out delivery, failed checkpoint writes and lost checkpoint CAS ownership block the channel without acknowledging the failed event. Automatic reconnect waits for an interrupted consumer invocation to settle before replaying it. Its original handler deadline remains active; if it ignores cancellation beyond that deadline, the channel blocks. This settlement barrier applies to the acknowledged consumer, not arbitrary observational `on()` promises or a manually created replacement client.
 
+Managed inbox discovery also waits for interrupted consumer work and pending checkpoint storage when removing a conversation, before a later discovery can rejoin it. The original handler deadline still applies; checkpoint settlement has a `retry.totalTimeoutMs` budget. Failure blocks the watcher instead of starting a replacement over unfinished work. Explicit watcher/client close cancels this wait; settle or reconcile outstanding application work before manually starting another watcher.
+
 After correcting a blocked failure, settle or reconcile outstanding effects, close all handles for that channel, and create a new subscription using the same consumer/store. A persisted checkpoint can then resume. Changing consumer identity to bypass a conflict creates a different persistence scope and can repeat work.
 
 ## Reconnect and coverage

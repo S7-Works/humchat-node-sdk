@@ -15,10 +15,14 @@ const cursor = (id, sequence) => Buffer.from(JSON.stringify({ schema: 1, org_uui
 const sequence = value => Number(JSON.parse(Buffer.from(value, 'base64url').toString()).sequence);
 const conversation = id => ({ id, channel_key: channel(id), name: null, kind: 'dm', member_count: 2, my_role: 'member',
   members: [{ user_uuid: actor, role: 'member' }, { user_uuid: peerId, role: 'member' }], last_message_at: null });
-async function until(predicate, message) {
-  const end = Date.now() + 5000;
+async function until(predicate, message, timeoutMs = 5000) {
+  const end = Date.now() + timeoutMs;
   while (Date.now() < end) { if (await predicate()) return; await sleep(10); }
   assert.fail('Timed out: ' + message);
+}
+function deferred() {
+  let resolve; let reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function fixture(t) {
   const rows = new Map(); const streams = new Map(); const sockets = new Map(); const clients = [];
@@ -135,6 +139,250 @@ test('membership removal closes only owned conversation handles and rejoining us
   peer.add('a'); await inbox.refresh();
   await until(async () => await store.load(peer.scope('a')) === missed.cursor, 'rejoin checkpoint');
   assert.deepEqual(seen, ['a-first', 'a-away']);
+});
+
+test('automatic inbox rejoin waits for a cancelled consumer to finish cleanup before replaying', { timeout: 10000 }, async t => {
+  const peer = await fixture(t); peer.add('cleanup'); const event = peer.append('cleanup', 'command');
+  const store = new MemoryCheckpointStore(); t.after(() => store.close());
+  const client = peer.client({ realtime: { handlerTimeoutMs: 3000 } });
+  const cleanup = deferred(); t.after(() => cleanup.resolve());
+  let active = 0; let peak = 0; let cancellationObserved = false; let cleanupFinished = false;
+  const starts = []; const signals = [];
+  const inbox = watch(client, store, async (item, { signal }) => {
+    starts.push(item.eventId); signals.push(signal); active++; peak = Math.max(peak, active);
+    try {
+      if (starts.length === 1) {
+        await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        cancellationObserved = true; await cleanup.promise; cleanupFinished = true;
+      } else assert.equal(cleanupFinished, true, 'Replacement must wait for cancelled application cleanup');
+    } finally { active--; }
+  }, { pollIntervalMs: 10000 });
+  await until(() => starts.length === 1, 'original consumer starts');
+  peer.rows.delete('cleanup'); let removed = false; const removal = inbox.refresh();
+  void removal.then(() => { removed = true; }, () => { removed = true; });
+  await until(() => cancellationObserved && [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'removal cancels the consumer and closes its socket');
+  assert.equal(signals[0].aborted, true); assert.equal(active, 1);
+  assert.equal(removed, false, 'Removal must await cancelled application cleanup');
+  assert.equal(inbox.getStats().conversations, 0); assert.equal(starts.length, 1);
+  peer.add('cleanup'); assert.equal(inbox.refresh(), removal, 'Rejoin discovery coalesces with pending retirement');
+  assert.notEqual(await store.load(peer.scope('cleanup')), event.cursor);
+  cleanup.resolve(); await removal; await inbox.refresh();
+  await until(async () => await store.load(peer.scope('cleanup')) === event.cursor, 'replacement replay acknowledgement');
+  assert.deepEqual(starts, [event.event_id, event.event_id]); assert.equal(peak, 1); assert.equal(active, 0);
+  assert.equal(inbox.status, 'watching'); assert.equal(inbox.error, null);
+});
+
+test('automatic inbox rejoin waits for an in-flight checkpoint write before loading the retained cursor', { timeout: 10000 }, async t => {
+  const peer = await fixture(t); peer.add('commit'); const event = peer.append('commit', 'command');
+  const storage = new MemoryCheckpointStore(); t.after(() => storage.close());
+  const write = deferred(); t.after(() => write.resolve());
+  let writeStarted = false; const casResults = [];
+  const store = {
+    load: scope => storage.load(scope),
+    async compareAndSet(scope, previous, next) {
+      if (scope.channelId === channel('commit') && next === event.cursor) { writeStarted = true; await write.promise; }
+      const result = await storage.compareAndSet(scope, previous, next);
+      if (scope.channelId === channel('commit') && next === event.cursor) casResults.push(result);
+      return result;
+    },
+  };
+  const client = peer.client({ realtime: { handlerTimeoutMs: 3000 } }); const observed = [];
+  const inbox = watch(client, store, item => { observed.push(item.eventId); }, { pollIntervalMs: 10000 });
+  await until(() => writeStarted, 'original checkpoint write starts');
+  peer.rows.delete('commit'); let removed = false; const removal = inbox.refresh();
+  void removal.then(() => { removed = true; }, () => { removed = true; });
+  await until(() => [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'removal closes the socket with its checkpoint write still pending');
+  assert.equal(removed, false, 'Removal must await the original checkpoint write');
+  assert.equal(inbox.getStats().conversations, 0); assert.deepEqual(observed, [event.event_id]); assert.deepEqual(casResults, []);
+  peer.add('commit'); assert.equal(inbox.refresh(), removal, 'Rejoin discovery coalesces with pending checkpoint retirement');
+  write.resolve(); await removal; await inbox.refresh();
+  await until(() => inbox.getStats().channels.length === 1 && inbox.getStats().channels[0].status === 'live', 'replacement resumes from committed checkpoint');
+  assert.equal(await storage.load(peer.scope('commit')), event.cursor);
+  assert.deepEqual(observed, [event.event_id]); assert.deepEqual(casResults, [true]);
+  const next = peer.append('commit', 'next'); peer.publish(next);
+  await until(async () => await storage.load(peer.scope('commit')) === next.cursor, 'replacement can acknowledge a new message');
+  assert.deepEqual(observed, [event.event_id, next.event_id]);
+  assert.equal(inbox.status, 'watching'); assert.equal(inbox.error, null); assert.equal(inbox.lastChannelError, null);
+});
+
+for (const failure of ['rejection', 'timeout', 'conflict']) {
+  const errorCode = failure === 'conflict' ? 'CONFLICT' : 'PERSISTENCE';
+  test(`automatic inbox rejoin blocks with sanitized ${errorCode} after checkpoint retirement ${failure}`, { timeout: 6000 }, async t => {
+    const peer = await fixture(t); peer.add('store-failure'); const event = peer.append('store-failure', 'command');
+    const storage = new MemoryCheckpointStore(); const write = deferred(); let pendingWrite;
+    t.after(async () => { write.resolve(); await pendingWrite?.catch(() => {}); await storage.close(); });
+    const store = {
+      load: scope => storage.load(scope),
+      compareAndSet(scope, previous, next) {
+        if (next === event.cursor) return pendingWrite = write.promise.then(result => result === false ? false : storage.compareAndSet(scope, previous, next));
+        return storage.compareAndSet(scope, previous, next);
+      },
+    };
+    const client = peer.client({ retry: { maxRetries: 0, totalTimeoutMs: 500 } }); let deliveries = 0;
+    const inbox = watch(client, store, () => { deliveries++; }, { pollIntervalMs: 10000 });
+    await until(() => Boolean(pendingWrite), 'checkpoint write is held');
+    peer.rows.delete('store-failure'); const removal = inbox.refresh(); void removal.catch(() => {});
+    await until(() => [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'retirement closes the socket before the store settles');
+    peer.add('store-failure'); assert.equal(inbox.refresh(), removal);
+    const privateDetail = 'private-checkpoint-backend-password';
+    if (failure === 'rejection') write.reject(new Error(privateDetail));
+    if (failure === 'conflict') write.resolve(false);
+    await until(() => inbox.status === 'blocked', 'retirement reports the store failure within its 500 ms budget', 1500);
+    await assert.rejects(removal, error => {
+      assert.equal(error.code, errorCode); assert.ok(!error.message.includes(privateDetail)); assert.equal(error.cause, undefined); return true;
+    });
+    await assert.rejects(inbox.done, { code: errorCode });
+    assert.equal(inbox.error.code, errorCode); assert.ok(!inbox.error.message.includes(privateDetail));
+    assert.equal(deliveries, 1); assert.equal(peer.upgrades.length, 1); assert.equal(inbox.getStats().conversations, 0);
+    assert.notEqual(await storage.load(peer.scope('store-failure')), event.cursor);
+    if (failure === 'timeout') {
+      write.resolve(); await pendingWrite;
+      assert.equal(await storage.load(peer.scope('store-failure')), event.cursor, 'An already-started write may finish after retirement times out');
+    }
+    await assert.rejects(inbox.refresh(), { code: errorCode });
+    assert.equal(inbox.status, 'blocked'); assert.equal(deliveries, 1); assert.equal(peer.upgrades.length, 1);
+  });
+}
+
+test('client close cancels automatic inbox retirement while a checkpoint write remains pending', { timeout: 6000 }, async t => {
+  const peer = await fixture(t); peer.add('store-close'); const event = peer.append('store-close', 'command');
+  const storage = new MemoryCheckpointStore(); const write = deferred(); let pendingWrite;
+  t.after(async () => { write.resolve(); await pendingWrite?.catch(() => {}); await storage.close(); });
+  const store = {
+    load: scope => storage.load(scope),
+    compareAndSet(scope, previous, next) {
+      if (next === event.cursor) return pendingWrite = write.promise.then(() => storage.compareAndSet(scope, previous, next));
+      return storage.compareAndSet(scope, previous, next);
+    },
+  };
+  const client = peer.client({ retry: { maxRetries: 0, totalTimeoutMs: 3000 } }); let deliveries = 0;
+  const inbox = watch(client, store, () => { deliveries++; }, { pollIntervalMs: 10000 });
+  await until(() => Boolean(pendingWrite), 'checkpoint write is held');
+  peer.rows.delete('store-close'); const removal = inbox.refresh();
+  const rejectedRemoval = assert.rejects(removal, { code: 'ABORT' }); void rejectedRemoval.catch(() => {});
+  await until(() => [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'retirement reaches its pending checkpoint write');
+  peer.add('store-close'); assert.equal(inbox.refresh(), removal);
+  let closed = false; const close = client.close(); void close.then(() => { closed = true; }, () => {});
+  await until(() => closed, 'client close completes before the 3 s checkpoint deadline', 1000); await close;
+  await rejectedRemoval; await inbox.done;
+  assert.equal(inbox.status, 'closed'); assert.notEqual(await storage.load(peer.scope('store-close')), event.cursor);
+  assert.equal(client.realtime.getStats().channels, 0); assert.equal(deliveries, 1);
+  write.resolve(); await pendingWrite;
+  assert.equal(await storage.load(peer.scope('store-close')), event.cursor, 'An in-flight write may commit after close');
+  assert.equal(inbox.status, 'closed'); assert.equal(deliveries, 1); assert.equal(peer.upgrades.length, 1);
+});
+
+test('removing multiple conversations cancels every consumer before awaiting any cleanup', { timeout: 6000 }, async t => {
+  const peer = await fixture(t); peer.add('a'); peer.add('b');
+  const first = peer.append('a', 'a-command'); const second = peer.append('b', 'b-command');
+  const store = new MemoryCheckpointStore(); t.after(() => store.close()); const cleanup = deferred(); t.after(() => cleanup.resolve());
+  const signals = new Map(); const cancelled = new Set(); const client = peer.client({ realtime: { handlerTimeoutMs: 3000 } });
+  const inbox = watch(client, store, async (item, { signal }) => {
+    signals.set(item.state.id, signal);
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    cancelled.add(item.state.id);
+    if (item.state.id === 'a-command') await cleanup.promise;
+  }, { pollIntervalMs: 10000 });
+  await until(() => signals.size === 2, 'both consumers start');
+  peer.rows.clear(); let removed = false; const removal = inbox.refresh();
+  void removal.then(() => { removed = true; }, () => { removed = true; });
+  await until(() => cancelled.size === 2 && [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'both removed conversations are cancelled while the first cleanup is held', 1000);
+  assert.equal(removed, false); assert.equal(inbox.getStats().conversations, 0);
+  assert.ok([...signals.values()].every(signal => signal.aborted));
+  cleanup.resolve(); await removal;
+  assert.notEqual(await store.load(peer.scope('a')), first.cursor); assert.notEqual(await store.load(peer.scope('b')), second.cursor);
+  assert.equal(inbox.status, 'watching'); assert.equal(client.realtime.getStats().channels, 0);
+});
+
+test('removing an inbox consumer with a shared observer waits for cleanup and preserves other conversations', { timeout: 6000 }, async t => {
+  const peer = await fixture(t); peer.add('a'); peer.add('b'); const first = peer.append('a', 'a-command');
+  const store = new MemoryCheckpointStore(); t.after(() => store.close()); const cleanup = deferred(); t.after(() => cleanup.resolve());
+  const client = peer.client({ realtime: { handlerTimeoutMs: 3000 } }); const observed = []; let cancellationObserved = false;
+  const inbox = watch(client, store, async (item, { signal }) => {
+    observed.push(item.state.id);
+    if (item.state.id === 'a-command') {
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      cancellationObserved = true; await cleanup.promise;
+    }
+  }, { pollIntervalMs: 10000 });
+  await until(() => observed.length === 1 && inbox.getStats().channels.some(entry => entry.channelId === channel('b') && entry.status === 'live'), 'consumer starts and the other channel becomes live');
+  const observer = client.realtime.subscribe(channel('a'), { start: 'earliest' }); t.after(() => observer.close());
+  peer.rows.delete('a'); let removed = false; const removal = inbox.refresh();
+  void removal.then(() => { removed = true; }, () => { removed = true; });
+  await until(() => cancellationObserved && observer.status === 'blocked' && [...peer.sockets].filter(([, id]) => id === 'a').every(([ws]) => ws.readyState === WebSocket.CLOSED), 'shared channel stops while consumer cleanup remains held');
+  assert.equal(removed, false, 'Blocking the remaining observer must preserve the consumer cleanup deadline');
+  assert.equal(inbox.status, 'watching'); assert.equal(inbox.getStats().conversations, 1);
+  cleanup.resolve(); await removal;
+  assert.equal(inbox.status, 'watching'); assert.equal(inbox.error, null);
+  const next = peer.append('b', 'b-command'); peer.publish(next);
+  await until(async () => await store.load(peer.scope('b')) === next.cursor, 'remaining inbox conversation still processes messages');
+  assert.deepEqual(observed, ['a-command', 'b-command']); assert.notEqual(await store.load(peer.scope('a')), first.cursor);
+  await observer.close(); assert.equal(client.realtime.getStats().channels, 1);
+});
+
+test('automatic inbox rejoin after settled work retains the checkpoint without replaying acknowledged events', { timeout: 6000 }, async t => {
+  const peer = await fixture(t); peer.add('settled'); const event = peer.append('settled', 'command');
+  const store = new MemoryCheckpointStore(); t.after(() => store.close()); const observed = [];
+  const inbox = watch(peer.client(), store, item => { observed.push(item.eventId); }, { pollIntervalMs: 10000 });
+  await until(async () => await store.load(peer.scope('settled')) === event.cursor, 'original work is acknowledged');
+  peer.rows.delete('settled'); await inbox.refresh();
+  peer.add('settled'); await inbox.refresh();
+  await until(() => inbox.getStats().channels.length === 1 && inbox.getStats().channels[0].status === 'live', 'rejoined channel catches up');
+  assert.deepEqual(observed, [event.event_id]); assert.equal(await store.load(peer.scope('settled')), event.cursor);
+  const next = peer.append('settled', 'after-rejoin'); peer.publish(next);
+  await until(async () => await store.load(peer.scope('settled')) === next.cursor, 'rejoined channel acknowledges new work');
+  assert.deepEqual(observed, [event.event_id, next.event_id]); assert.equal(inbox.status, 'watching');
+});
+
+for (const closing of ['watcher', 'client']) {
+  test(`closing the ${closing} cancels a pending automatic rejoin without awaiting consumer cleanup`, { timeout: 6000 }, async t => {
+    const peer = await fixture(t); peer.add('closing'); const event = peer.append('closing', 'command');
+    const store = new MemoryCheckpointStore(); t.after(() => store.close());
+    const client = peer.client({ realtime: { handlerTimeoutMs: 3000 } });
+    const cleanup = deferred(); t.after(() => cleanup.resolve());
+    let deliveries = 0; let cancellationObserved = false; let cleanupFinished = false;
+    const inbox = watch(client, store, async (_item, { signal }) => {
+      deliveries++;
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      cancellationObserved = true; await cleanup.promise; cleanupFinished = true;
+    }, { pollIntervalMs: 10000 });
+    await until(() => deliveries === 1, 'original consumer starts');
+    peer.rows.delete('closing'); const removal = inbox.refresh();
+    const rejectedRejoin = assert.rejects(removal, { code: 'ABORT' });
+    void rejectedRejoin.catch(() => {});
+    await until(() => cancellationObserved && [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'retirement reaches the held consumer cleanup');
+    peer.add('closing'); assert.equal(inbox.refresh(), removal, 'Rejoin remains pending while retirement awaits cleanup');
+    let closed = false; const close = closing === 'watcher' ? inbox.close() : client.close();
+    void close.then(() => { closed = true; }, () => {});
+    await until(() => closed, 'explicit close completes while application cleanup is held', 1000); await close;
+    await rejectedRejoin; await inbox.done;
+    assert.equal(inbox.status, 'closed'); assert.equal(cleanupFinished, false); assert.equal(deliveries, 1);
+    assert.equal(client.realtime.getStats().channels, 0);
+    assert.notEqual(await store.load(peer.scope('closing')), event.cursor);
+    const upgrades = peer.upgrades.length; cleanup.resolve();
+    await until(() => cleanupFinished, 'application cleanup finishes after explicit close');
+    assert.equal(peer.upgrades.length, upgrades); assert.equal(deliveries, 1);
+  });
+}
+
+test('automatic inbox rejoin blocks at the handler deadline when a cancelled consumer never settles', { timeout: 6000 }, async t => {
+  const peer = await fixture(t); peer.add('stuck'); const event = peer.append('stuck', 'command');
+  const store = new MemoryCheckpointStore(); t.after(() => store.close());
+  const client = peer.client({ realtime: { handlerTimeoutMs: 500 } });
+  let deliveries = 0; let observedSignal;
+  const inbox = watch(client, store, (_item, { signal }) => {
+    deliveries++; observedSignal = signal; return new Promise(() => {});
+  }, { pollIntervalMs: 10000 });
+  await until(() => deliveries === 1, 'never-settling consumer starts');
+  peer.rows.delete('stuck'); const removal = inbox.refresh(); void removal.catch(() => {});
+  await until(() => observedSignal.aborted && [...peer.sockets.keys()].every(ws => ws.readyState === WebSocket.CLOSED), 'retirement cancels the stuck consumer and closes its socket');
+  peer.add('stuck'); assert.equal(inbox.refresh(), removal, 'Rejoin waits for the never-settling consumer');
+  await until(() => inbox.status === 'blocked', 'rejoin observes the 500 ms handler deadline', 1500);
+  await assert.rejects(removal, { code: 'PROTOCOL' });
+  await assert.rejects(inbox.done, { code: 'PROTOCOL' });
+  assert.equal(inbox.status, 'blocked'); assert.equal(inbox.error.code, 'PROTOCOL'); assert.equal(deliveries, 1);
+  assert.equal(peer.upgrades.length, 1); assert.notEqual(await store.load(peer.scope('stuck')), event.cursor);
+  await assert.rejects(inbox.refresh(), { code: 'PROTOCOL' }); assert.equal(deliveries, 1);
 });
 
 test('discovery failure is terminal, observable, and stops polling and delivery', { timeout: 6000 }, async t => {

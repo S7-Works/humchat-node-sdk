@@ -109,9 +109,14 @@ export class InboxWatch {
       }
     }
     const present = new Set(conversations.map(conversation => conversation.channelId));
+    const retiring: Promise<void>[] = [];
     for (const [channelId, handle] of this.#handles) {
-      if (!present.has(channelId)) { this.#handles.delete(channelId); await handle.close(); }
+      if (!present.has(channelId)) {
+        this.#handles.delete(channelId);
+        retiring.push(this.realtime.retire(handle, this.#cancel.signal));
+      }
     }
+    await Promise.all(retiring);
     for (const conversation of conversations) {
       if (this.#cancel.signal.aborted) throw new AbortError('Inbox watcher is closed');
       if (this.#handles.has(conversation.channelId)) continue;
