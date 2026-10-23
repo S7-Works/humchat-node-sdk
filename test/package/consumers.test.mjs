@@ -299,6 +299,49 @@ assert.equal(verified.event.state.body, 'Hello webhook');
 assert.throws(() => verifyWebhook(signedBody + ' ', signedHeader, ${JSON.stringify(webhookSecret)}), WebhookVerificationError);
 const client = new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', tokenProvider: async () => ({token: 'fixture-token'})});
 assert.equal(client.getConfig().orgId, 'fixture-org');
+assert.equal(client.getConfig().authentication, 'tokenProvider');
+const sdkKey = 'hsk_synthetic_package_sdk_key_not_real';
+const sdkKeyToken = 'synthetic-package-sdk-key-minted-token';
+const sdkKeyOrg = 'abcdefab-2222-4222-8222-222222222222';
+const sdkKeyEmail = 'synthetic.package.actor@example.invalid';
+const sdkKeyCalls = [];
+const sdkKeyClient = new HumChat({orgId: sdkKeyOrg.toUpperCase(), baseUrl: 'http://127.0.0.1:43125',
+  auth: {sdkKey, actAs: '  ' + sdkKeyEmail.toUpperCase() + '  '},
+  fetch: async (url, init = {}) => {
+    const target = new URL(url), headers = new Headers(init.headers);
+    assert.equal(target.origin, 'http://127.0.0.1:43125');
+    assert.equal(target.search, '');
+    assert.equal(init.redirect, 'error');
+    sdkKeyCalls.push(target.pathname);
+    if (target.pathname === '/api/sdk/auth/user-token') {
+      assert.equal(init.method, 'POST');
+      assert.equal(headers.get('x-humchat-sdk-key'), sdkKey);
+      assert.equal(headers.has('authorization'), false);
+      assert.equal(headers.get('content-type'), 'application/json');
+      assert.deepEqual(JSON.parse(init.body), {org_uuid: sdkKeyOrg, email: sdkKeyEmail, expires_in: 900});
+      return Response.json({access_token: sdkKeyToken, token_type: 'Bearer', expires_in: 900});
+    }
+    assert.equal(init.method ?? 'GET', 'GET');
+    assert.equal(headers.has('x-humchat-sdk-key'), false);
+    assert.equal(headers.get('authorization'), 'Bearer ' + sdkKeyToken);
+    if (target.pathname === '/me') return Response.json({user_uuid: 'sdk-key-fixture-actor', org: sdkKeyOrg,
+      email: sdkKeyEmail, roles: ['member'], expires_at: Math.floor(Date.now() / 1000) + 900});
+    if (target.pathname === '/api/sdk/capabilities') return Response.json({sdk_protocol_version: 1,
+      authentication: {user_sessions: true, service_identities: false, api_key_exchange: false,
+        app_binding_required: false, mock_authentication: false, socket_session_end_codes: ['TOKEN_EXPIRED'],
+        sdk_key_user_tokens: {endpoint: '/api/sdk/auth/user-token', key_header: 'X-HumChat-Sdk-Key', configured: true}},
+      messaging: {send_receipt_versions: [1], message_state_versions: [1], history_versions: [2],
+        durable_replay: false, websocket_scope: 'channel'}});
+    if (target.pathname === '/api/workspace/channels') return Response.json({org_uuid: sdkKeyOrg,
+      team_uuid: 'sdk-key-fixture-team', team_name: 'SDK key fixture', channels: []});
+    assert.fail('Unexpected SDK-key consumer request');
+  }});
+assert.deepEqual(sdkKeyCalls, [], 'SDK-key construction must not make requests');
+assert.equal(sdkKeyClient.getConfig().authentication, 'sdkKey');
+assert.equal(sdkKeyClient.getConfig().orgId, sdkKeyOrg);
+assert.ok(!JSON.stringify(sdkKeyClient.getConfig()).includes(sdkKey));
+assert.ok(!JSON.stringify(sdkKeyClient.getConfig()).includes(sdkKeyEmail));
+assert.equal('auth' in sdkKeyClient.getConfig(), false);
 assert.equal(typeof client.messages.send, 'function');
 assert.equal(typeof client.messages.iterateHistory, 'function');
 assert.equal(typeof client.channels.list, 'function');
@@ -311,6 +354,26 @@ assert.equal(typeof client.outbox.flush, 'function');
 assert.equal(typeof client.webhooks.create, 'function');
 assert.equal(typeof client.webhooks.deliveries, 'function');
 assert.ok(!JSON.stringify(client.getConfig()).includes('fixture-token'));
+async function verifySdkKeyAuthentication() {
+  const [first, second, capabilities] = await Promise.all([
+    sdkKeyClient.connect(), sdkKeyClient.connect(), sdkKeyClient.getCapabilities(),
+  ]);
+  assert.equal(first.actorId, 'sdk-key-fixture-actor');
+  assert.equal(first.orgId, sdkKeyOrg);
+  assert.deepEqual(second, first);
+  assert.deepEqual(capabilities.authentication.sdkKeyUserTokens,
+    {endpoint: '/api/sdk/auth/user-token', keyHeader: 'X-HumChat-Sdk-Key', configured: true});
+  assert.deepEqual(capabilities.authentication.socketSessionEndCodes, ['TOKEN_EXPIRED']);
+  capabilities.authentication.socketSessionEndCodes.length = 0;
+  assert.deepEqual((await sdkKeyClient.getCapabilities()).authentication.socketSessionEndCodes, ['TOKEN_EXPIRED']);
+  capabilities.authentication.sdkKeyUserTokens.endpoint = '/changed-by-consumer';
+  assert.equal((await sdkKeyClient.getCapabilities()).authentication.sdkKeyUserTokens.endpoint, '/api/sdk/auth/user-token');
+  assert.deepEqual((await sdkKeyClient.channels.list()).channels, []);
+  assert.deepEqual(sdkKeyCalls, ['/api/sdk/auth/user-token', '/me', '/api/sdk/capabilities', '/api/workspace/channels'],
+    'Concurrent login and subsequent resource calls must reuse one verified minted token');
+  const safe = JSON.stringify(sdkKeyClient.getConfig());
+  for (const credential of [sdkKey, sdkKeyToken, sdkKeyEmail]) assert.ok(!safe.includes(credential));
+}
 async function verifyMultiplexCapabilities() {
   const multiplex = new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', realtime: {transport: 'multiplex'},
     tokenProvider: async () => ({token: 'fixture-token'}), fetch: async url => Response.json(new URL(url).pathname === '/me'
@@ -323,6 +386,8 @@ async function verifyMultiplexCapabilities() {
   try {
     assert.equal(multiplex.getConfig().realtime.transport, 'multiplex');
     const capabilities = await multiplex.getCapabilities();
+    assert.equal(capabilities.authentication.sdkKeyUserTokens, null, 'Legacy token providers must support servers without SDK-key capabilities');
+    assert.deepEqual(capabilities.authentication.socketSessionEndCodes, []);
     assert.deepEqual(capabilities.messaging.multiplexedEvents, {protocolVersions: [1], maxChannels: 100});
     assert.deepEqual(capabilities.messaging.outgoingWebhooks, {schemaVersions: [1], maxChannels: 50, workspaceChannelsOnly: true});
     capabilities.messaging.multiplexedEvents.protocolVersions.push(99);
@@ -331,11 +396,11 @@ async function verifyMultiplexCapabilities() {
 }
 `;
   await check('ESM runtime resolves its exported entry point', async () => {
-    await writeFile(join(consumer, 'esm.mjs'), "import assert from 'node:assert/strict';\nimport { HumChat, ConflictError, verifyWebhook, WebhookVerificationError } from '@humchat/node';\n" + runtimeBody + '\nawait verifyMultiplexCapabilities();\nawait client.close();\n');
+    await writeFile(join(consumer, 'esm.mjs'), "import assert from 'node:assert/strict';\nimport { HumChat, ConflictError, verifyWebhook, WebhookVerificationError } from '@humchat/node';\n" + runtimeBody + '\nawait verifySdkKeyAuthentication();\nawait verifyMultiplexCapabilities();\nawait client.close();\nawait sdkKeyClient.close();\n');
     run([join(consumer, 'esm.mjs')], consumer);
   });
   await check('CJS runtime resolves its exported entry point', async () => {
-    await writeFile(join(consumer, 'commonjs.cjs'), "const assert = require('node:assert/strict');\nconst { HumChat, ConflictError, verifyWebhook, WebhookVerificationError } = require('@humchat/node');\n" + runtimeBody + '\nverifyMultiplexCapabilities().then(() => client.close()).catch(() => { process.exitCode = 1; });\n');
+    await writeFile(join(consumer, 'commonjs.cjs'), "const assert = require('node:assert/strict');\nconst { HumChat, ConflictError, verifyWebhook, WebhookVerificationError } = require('@humchat/node');\n" + runtimeBody + '\nverifySdkKeyAuthentication().then(() => verifyMultiplexCapabilities()).then(() => client.close()).then(() => sdkKeyClient.close()).catch(() => { process.exitCode = 1; });\n');
     run([join(consumer, 'commonjs.cjs')], consumer);
   });
   await check('ESM and CJS type consumers accept valid calls and reject invalid calls', async () => {
@@ -345,9 +410,60 @@ const client = new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:431
   void allowed; void previous;
   return {token: 'fixture-token', expiresAt: 2_000_000_000};
 }, recovery: {mode: 'bestEffort'}, realtime: {maxChannels: 5, connectConcurrency: 2}});
+const sdkKeyAuth: import('@humchat/node').SdkKeyAuthOptions = {
+  sdkKey: 'hsk_synthetic_package_sdk_key_not_real', actAs: 'synthetic.package.actor@example.invalid',
+};
+const sdkKeyOptions: import('@humchat/node').HumChatOptions = {
+  orgId: '22222222-2222-4222-8222-222222222222', baseUrl: 'http://127.0.0.1:43125', auth: sdkKeyAuth,
+};
+const sdkKeyClient = new HumChat(sdkKeyOptions);
+const safeConfig: import('@humchat/node').SafeConfig = sdkKeyClient.getConfig();
+const authentication: 'tokenProvider' | 'sdkKey' = safeConfig.authentication;
+const providerOptions: import('@humchat/node').HumChatOptions = {
+  orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', tokenProvider: async () => ({token: 'fixture-token'}),
+};
+new HumChat(providerOptions);
+void authentication;
+// @ts-expect-error safe config does not expose authentication credentials
+safeConfig.auth;
+// @ts-expect-error the authentication mode includes sdkKey
+const providerOnlyAuthentication: 'tokenProvider' = safeConfig.authentication;
+const ambiguousOptions = {...sdkKeyOptions, tokenProvider: async () => ({token: 'fixture-token'})};
+// @ts-expect-error authentication modes are exclusive even for non-literal options
+new HumChat(ambiguousOptions);
+// @ts-expect-error an authentication mode is required
+new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125'});
+// @ts-expect-error SDK-key authentication requires actAs
+new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', auth: {sdkKey: 'hsk_synthetic_package_sdk_key_not_real'}});
+// @ts-expect-error SDK-key authentication requires sdkKey
+new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', auth: {actAs: 'synthetic.package.actor@example.invalid'}});
+// @ts-expect-error sdkKey must be text
+new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', auth: {sdkKey: 123, actAs: sdkKeyAuth.actAs}});
+// @ts-expect-error actAs must be text
+new HumChat({orgId: 'fixture-org', baseUrl: 'http://127.0.0.1:43125', auth: {sdkKey: sdkKeyAuth.sdkKey, actAs: 123}});
+// @ts-expect-error exact optional properties reject an explicitly undefined alternate mode
+new HumChat({...sdkKeyOptions, tokenProvider: undefined});
+// @ts-expect-error exact optional properties reject an explicitly undefined alternate mode
+new HumChat({...providerOptions, auth: undefined});
 async function validCalls() {
   const identity = await client.connect();
   const capabilities: import('@humchat/node').SdkCapabilities = await client.getCapabilities();
+  const sdkKeyTokens: {endpoint: string; keyHeader: string; configured: boolean} | null = capabilities.authentication.sdkKeyUserTokens;
+  const socketSessionEndCodes: string[] = capabilities.authentication.socketSessionEndCodes;
+  // @ts-expect-error session-end capability codes are strings, not numeric protocol versions
+  const invalidSessionCodes: number[] = capabilities.authentication.socketSessionEndCodes;
+  void socketSessionEndCodes; void invalidSessionCodes;
+  if (sdkKeyTokens) {
+    const endpoint: string = sdkKeyTokens.endpoint;
+    const keyHeader: string = sdkKeyTokens.keyHeader;
+    const configured: boolean = sdkKeyTokens.configured;
+    // @ts-expect-error configuration readiness is a boolean
+    const wrongConfigured: string = sdkKeyTokens.configured;
+    void endpoint; void keyHeader; void configured; void wrongConfigured;
+  }
+  // @ts-expect-error absent SDK-key support must be handled explicitly
+  const unguardedSdkKeyEndpoint: string = capabilities.authentication.sdkKeyUserTokens.endpoint;
+  void unguardedSdkKeyEndpoint;
   const multiplexed: {protocolVersions: number[]; maxChannels: number} | null = capabilities.messaging.multiplexedEvents;
   if (multiplexed) {
     const supported: boolean = multiplexed.protocolVersions.includes(1);

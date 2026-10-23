@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.8 - 2026-10-23 (local review preview; unpublished)
+
+This preview versions the SDK-key work from Phases 2–7. It remains `private: true` and `UNLICENSED`; no npm release is published. Production messaging/app acceptance, delegated-admin enforcement, the server expiry companion and pilot acceptance remain open.
+
+- Added mutually exclusive typed `auth: { sdkKey, actAs }` and `tokenProvider` configuration, with SDK-key input validation, browser refusal and HTTPS requirements outside literal loopback development origins.
+- Kept credentials out of inspectable configuration and retained existing token-provider behavior, including opaque/mock organization IDs.
+- Added same-origin SDK-key minting through HumChat, cached single-flight session acquisition, organization/member verification, bounded login retries and typed sanitized errors. The key is never sent as Bearer authentication.
+- Reject mint responses that reflect an SDK key as the user token. Redact preceding tokens from response request IDs during renewal, including rejected mint results; suppress remote request IDs after bounded credential history fills.
+- Exposed normalized `authentication.sdkKeyUserTokens` capabilities; older token-provider servers remain compatible. Login metadata cannot redirect the credential to another endpoint or header.
+- Integrated the existing expiry schedule and one-retry resource HTTP 401 lifecycle. Validated native key renewal across compatibility, durable-channel and multiplex sockets, including checkpoint recovery.
+- Transient timer-refresh failures now reconnect with backoff; native mint 401/403 is latched until a new client. Revocation cancels pending acquisition and prevents late token verification/use.
+- Added shared backoff after retryable SDK-key acquisition failures, preventing many channels from triggering successive login attempts during an outage. Covered 50 channel sockets and 100 multiplex subscriptions, checkpoint recovery, cancellation and bounded acquisition retries with local peers.
+- Clarified explicit workspace team selection and preserved missing-workspace errors without automatic bootstrap writes.
+- Extended release credential checks to detect SDK-key strings without echoing them in failures.
+- Allowed numbered phase-report filenames under the existing package documentation policy and corrected repository-only links in shipped reports.
+- Added native SDK-key direct-message acceptance across two member identities, including managed inbox discovery, replies, reactions, ordinary user-session interoperability and checkpoint restart. Added an explicit live-server acceptance runner with synthetic verification; production send/reply and app UI acceptance remain pending a designated recipient.
+- Added capability-gated `TOKEN_EXPIRED` handling. Only a server advertising `authentication.socket_session_end_codes` can authorize recovery through that explicit code; legacy/unknown endings remain terminal. The server companion is prepared separately and requires build/deployment acceptance. The delegated-admin restriction mismatch remains server work. These preview changes have not been published.
+
 ## 0.1.0-alpha.7 - 2026-10-23
 
 - Added organization member lookup, conversation creation, exact-peer DM lookup and direct-send helpers.

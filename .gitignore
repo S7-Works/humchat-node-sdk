@@ -8,5 +8,7 @@ coverage/
 *.tgz
 *.log
 private-state/
+docs/SDK_KEY_AUTH_CONTRACT.md
+docs/SDK_KEY_AUTH_PHASE*_REPORT.md
 .DS_Store
 Thumbs.db

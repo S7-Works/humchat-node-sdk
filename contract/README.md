@@ -1,8 +1,8 @@
 # Captured HumChat wire contract
 
-`fixtures/http-ws.json` was captured from a local HumChat Rust server with a real PostgreSQL database and mock ButtrBase identities. Its identities and message content are test data. The fixture records raw wire names and values before the SDK's camelCase mapping.
+`fixtures/http-ws.json` was captured from a local HumChat server using mock authentication and synthetic messages. The fixture records raw wire names and values before the SDK's camelCase mapping.
 
-The `provenance` object records capture time, Node version, the upstream server checkout's Git HEAD at test time, binary SHA-256, and the use of mock authentication. The Git value is not a commit in this standalone SDK repository and does not guarantee that an independently built binary came from a clean tree.
+The `provenance` object records the capture context. These local samples document specific wire responses; they do not certify production deployments or every server version.
 
 | Sample | What it records |
 | --- | --- |
@@ -14,7 +14,7 @@ The `provenance` object records capture time, Node version, the upstream server 
 | `typing`, `receipt` | Typing and Unix-second read-horizon events. |
 | `edit`, `delete`, `state` | Versioned edit, deletion, and final message tombstone. |
 
-The upstream server harness also checked send/reaction replay, changed-intent conflicts, stale revisions, wrong-author rejection, private-channel restrictions, cross-tenant rejection and channel separation. That harness remains in the server repository; this fixture is not a transcript of every request or a replacement for server acceptance tests.
+This fixture is not a transcript of every request or a replacement for server acceptance tests. Validate retries, conflicts, authorization and channel separation against the deployment you intend to use.
 
 No live samples were captured for `presence`, `resync`, `session_revoked`, `call_invite`, forward/undo/restore, attachments, or oversized histories. Their presence in source does not make them runtime-certified here. Future decoder tests should include separate, explicitly source-derived edge-case fixtures rather than relabeling invented data as captured traffic.
 

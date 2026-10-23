@@ -6,7 +6,8 @@ Import public symbols from `@humchat/node`. ESM and CommonJS are supported; Type
 
 | Option | Default / requirement |
 | --- | --- |
-| `orgId`, `baseUrl`, `tokenProvider` | Required. See [authentication](AUTHENTICATION.md). |
+| `orgId`, `baseUrl` | Required. SDK-key mode requires a canonical organization UUID and HTTPS outside literal loopback origins. |
+| `tokenProvider` or `auth: { sdkKey, actAs }` | Exactly one mode. On this unreleased branch, `auth` mints a delegated member token through HumChat; `tokenProvider` retains caller-managed acquisition. See [authentication](AUTHENTICATION.md). |
 | `timeout` | `10_000` milliseconds per HTTP attempt. |
 | `retry.maxRetries` | `3` retries after the initial attempt; allowed range 0–10. |
 | `retry.initialDelayMs`, `retry.maxDelayMs` | `250`, `2_000`; exponential full jitter, subject to Retry-After. |
@@ -14,6 +15,8 @@ Import public symbols from `@humchat/node`. ESM and CommonJS are supported; Type
 | `realtime.transport` | `'channel'` by default; `'multiplex'` shares one socket and requires durable recovery plus server capability. See [shared connections](MULTIPLEX.md). |
 | `recovery.mode` | `'durable'`; explicit `'bestEffort'` supports older servers. |
 | `fetch` | Node's global fetch. Optional HTTP transport injection; not WebSocket injection. |
+
+`SdkKeyAuthOptions` is exported for the new configuration. `HumChatOptions` is now a union of the two exclusive authentication modes; existing token-provider object literals remain valid. Application-specific configuration types should use an intersection such as `type AppOptions = HumChatOptions & { appName: string }` rather than an interface extending that union.
 
 Resource methods accept `RequestOptions = { signal?: AbortSignal, timeout?: number }`. `timeout` overrides the HTTP attempt timeout; it does not replace `retry.totalTimeoutMs` with a whole-workflow deadline. `connect()` and `getCapabilities()` cap their wait by the smaller of an explicitly supplied `timeout` and the total budget. Iteration and `outbox.flush()` perform multiple operations; custom persistence I/O needs its own bounds. For a deadline covering your full workflow, pass an `AbortSignal.timeout(...)` signal and ensure your own adapters/actions observe cancellation.
 
@@ -29,15 +32,21 @@ Identifiers are opaque, case-sensitive strings, not necessarily ULIDs. Supported
 | `getCapabilities(options?)` | `Promise<SdkCapabilities>`; cached with the verified session. |
 | `getConfig()` | Credential-free `SafeConfig` copy. |
 | `close()` | Cancels requests, subscriptions and timers; does not close caller-owned stores or revoke credentials. |
-| `channels.list({ teamId? }?, options?)` | `{ orgId, teamId, teamName, channels }`; it is one team-scoped result, not an all-teams iterator. |
+| `channels.list({ teamId? }?, options?)` | `{ orgId, teamId, teamName, channels }` for one existing team workspace. Pass `teamId` to select the team's channels. |
 | `conversations.list(options?)` | `Conversation[]`; use `channelId` for messages. |
 | `members.list(options?)` | Organization roster `{ actorId, name, email, role, status }[]`. |
 | `conversations.create({ memberIds, name? }, options?)` | Create/reuse a conversation; creation is not automatically retried. |
 | `conversations.openDirect({ memberId }, options?)` | Find an unnamed exact peer DM or ask the server to create/reuse it. |
 | `inbox.watch(handler, { consumerId, checkpointStore, pollIntervalMs?, maxConversations? })` | Managed discovery and acknowledged consumption across the identity's conversations. See [direct messages](DIRECT_MESSAGES.md). |
 
+`getCapabilities().authentication.sdkKeyUserTokens` is `{ endpoint, keyHeader, configured }` when advertised, otherwise `null`. SDK-key login bootstraps at the documented fixed HumChat endpoint, then verifies this metadata after `/me`. A missing/disabled capability rejects SDK-key login; an unsupported path/header raises `ProtocolError`. The metadata never redirects the key. Existing token-provider clients can connect without this new capability.
+
+`authentication.socketSessionEndCodes` is a string array, empty on older servers. When it includes `TOKEN_EXPIRED`, that exact code on a `session_revoked` frame permits verified renewal and reconnect. Missing/unknown codes and unadvertised expiry remain terminal. This optional protocol does not relax identity or channel authorization.
+
+`channels.list()` leaves team selection to HumChat. For a normal member session, the current server defaults to `<orgId>-home`; that workspace may not exist even when the member uses other teams in the HumChat app. Pass a known team ID from your application's HumChat team configuration. A missing workspace raises `NotFoundError` (404). The SDK has no team-list discovery method and does not create a workspace or change membership during channel lookup. `conversations.list()` discovers the member's separate DM/group conversation channels.
+
 ```js
-const { channels } = await client.channels.list();
+const { channels } = await client.channels.list({ teamId: process.env.HUMCHAT_TEAM_ID });
 for (const channel of channels) console.log(channel.id, channel.displayName);
 const conversations = await client.conversations.list();
 for (const conversation of conversations) {

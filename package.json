@@ -1,7 +1,7 @@
 {
   "name": "@humchat/node",
-  "version": "0.1.0-alpha.7",
-  "description": "HumChat backend SDK: typed HTTP and real-time preview with caller-supplied authentication",
+  "version": "0.1.0-alpha.8",
+  "description": "HumChat backend SDK: typed messaging and real-time preview with delegated member authentication",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",

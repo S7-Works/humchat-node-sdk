@@ -1,6 +1,27 @@
 # Direct messages and the managed inbox
 
-The SDK acts as the user returned by `client.connect()`. Messages to that identity are normal HumChat conversations; messages sent by the SDK use that same identity. This feature does not create a bot, impersonate another member, or bypass organization and conversation permissions. The server must expose `/api/sdk/capabilities` and the existing roster/conversation routes. Receiving also requires durable event protocol v1.
+The SDK acts as the user returned by `client.connect()`. Messages to that identity are normal HumChat conversations; messages sent by the SDK use that same identity. The server decides which member an SDK key may sign in as and which conversations that member may access. This feature does not create a bot or bypass organization and conversation permissions. The server must expose `/api/sdk/capabilities` and the existing roster/conversation routes. Receiving also requires durable event protocol v1.
+
+## Sign in through HumChat
+
+The unreleased SDK-key branch supports this setup for the send and receive examples below:
+
+```js
+import { HumChat } from '@humchat/node';
+
+const client = new HumChat({
+  baseUrl: process.env.HUMCHAT_BASE_URL,
+  orgId: process.env.HUMCHAT_ORG_ID,
+  auth: {
+    sdkKey: process.env.HUMCHAT_SDK_KEY,
+    actAs: process.env.HUMCHAT_ACT_AS,
+  },
+});
+await client.connect();
+// Use the send and inbox examples below; close the client during shutdown.
+```
+
+Exchange and automatic renewal go only through HumChat. A caller-supplied `tokenProvider` remains an alternative; do not combine it with `auth`. The older direct identity-provider app-login proposal and top-level `apiKey` form are not implemented by this contract. See [authentication](AUTHENTICATION.md) and the [updated login guide](SDK_KEY_LOGIN_GUIDE.md).
 
 ## Find a recipient and send
 

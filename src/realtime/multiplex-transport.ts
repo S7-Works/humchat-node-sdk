@@ -228,7 +228,9 @@ export class MultiplexTransport {
           const frame = raw as Frame;
           if (frame.type === 'session_revoked') {
             const parsed = parseFrame(frame, this.orgId, '');
-            if (parsed.kind === 'sessionRevoked') this.manager.revoke(parsed.reason);
+            if ((parsed.kind === 'sessionRevoked' || parsed.kind === 'sessionExpired') && this.manager.endSession(parsed, session)) {
+              fail(new NetworkError('Socket token expired; reconnecting with a fresh session', { retryable: true }));
+            }
             return;
           }
           if (frame.type === 'stream_error') throw new ProtocolError('Multiplex stream rejected by server');
@@ -330,7 +332,7 @@ export class MultiplexTransport {
         if (session.token !== this.#session?.token) this.rotate(session);
         else { this.#session = session; this.scheduleRefresh(generation); }
       } catch (error) {
-        if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.block(error instanceof HumChatError ? error : new AuthenticationError('Multiplex credential refresh failed')); }
+        if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.fail(error instanceof HumChatError ? error : new AuthenticationError('Multiplex credential refresh failed')); }
       } finally { lifetime.dispose(); }
     })(); }, Math.min(60_000, Math.max(1, this.#session.refreshAt * 1000 - Date.now())));
   }

@@ -1,6 +1,6 @@
 # Release preparation and publication
 
-The current output is a locally built `0.1.0-alpha.7` tarball. Source is public in [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk); no npm version is published. The package remains `private: true` and `UNLICENSED`. Production machine authentication, staging acceptance and the agreed 24-hour pilot remain open. Public source visibility does not establish production readiness or an open-source license.
+The current package version is `0.1.0-alpha.8`, a review preview with delegated member login through HumChat. Source is public in [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk); no npm version is published. The package remains `private: true` and `UNLICENSED`. Production deployment validation and a sustained pilot remain open. A passing local artifact manifest does not establish production readiness or grant an open-source license.
 
 ## Prepare a local artifact
 
@@ -17,20 +17,20 @@ The command prints a unique `target/release/release-*` directory containing:
 
 | Output | Purpose |
 | --- | --- |
-| `humchat-node-0.1.0-alpha.7.tgz` | Installable package with compiled outputs, documentation and examples. |
+| `humchat-node-0.1.0-alpha.8.tgz` | Installable package with compiled outputs, documentation and examples. |
 | `SHA256SUMS` | Archive hash for transfer verification. |
 | `release-manifest.json` | Runtime, package identity, packed file/source hashes, check results and open publication gates. `passed: true` means local validation passed. |
 | `logs/` and `consumers/` | Local validation evidence; these are not part of the npm tarball. |
 
 On failure, the manifest remains with `passed: false`; do not distribute its tarball. Every run uses a fresh directory. A dirty checkout is allowed for local review and recorded; its source hashes identify the inputs. It is not a clean-checkout release attestation. CI uses a fresh checkout and `npm ci`. The release manifest is evidence about validation, not cryptographic publisher identity or npm provenance.
 
-To verify a supplied archive, compare its SHA-256 with `SHA256SUMS`, then install it with `npm install /path/to/humchat-node-0.1.0-alpha.7.tgz`. Run the [examples](../examples/README.md) against an approved local or pilot environment using caller-managed tokens. Do not use `npm install @humchat/node` until an actual registry release exists.
+To verify a supplied archive, compare its SHA-256 with `SHA256SUMS`, then install it with `npm install /path/to/humchat-node-0.1.0-alpha.8.tgz`. Run the [examples](../examples/README.md) against an approved local or pilot environment using native `auth: { sdkKey, actAs }` or caller-managed `tokenProvider` authentication; configure exactly one mode. Do not use `npm install @humchat/node` until an actual registry release exists.
 
 ## Repository workflow
 
 The repository's `.github/workflows/ci.yml` runs package checks on Node 22/24 across Ubuntu, Windows and macOS for pushes and pull requests. The manual `.github/workflows/release.yml` prepares and uploads a validated tarball, checksum and manifest. Neither workflow publishes to npm or uses production credentials. Check the [Actions results](https://github.com/S7-Works/humchat-node-sdk/actions) for actual results; workflow configuration alone is not passing evidence. Verify an artifact's archive SHA-256 against its accompanying checksum before using it.
 
-Real HumChat server/PostgreSQL/provider acceptance and an independent team's pilot remain separate gates. The server and its end-to-end harness are maintained outside this standalone repository. Package checks do not certify server capacity or service credentials.
+Validation against a real HumChat deployment and an independent team's pilot remain separate gates. This repository does not build or start a HumChat server. The explicit [live message runner](SDK_KEY_MESSAGE_ACCEPTANCE.md) requires an authorized sender/recipient pair; production send/reply and app acceptance remain pending. Package checks use local synthetic peers and do not certify server capacity or HumChat app display.
 
 ## Decisions required before npm publication
 
@@ -40,8 +40,13 @@ Real HumChat server/PostgreSQL/provider acceptance and an independent team's pil
 | Public versus restricted npm access | Unassigned. The GitHub repository is public; `private: true` still prevents npm publication. |
 | License | `UNLICENSED`; owner decision pending. Public source visibility does not grant an open-source license. |
 | Support/security owner | Public issues accept nonsensitive questions; dedicated security contact and support commitments remain unassigned. See [support](SUPPORT.md). |
-| Service identity and staging/pilot | Required before release-candidate or stable promotion; no `apiKey` exchange is implemented. |
+| Production member messaging | Run the designated two-member DM/reply test and verify both messages in the HumChat app. This acceptance remains pending. |
+| Delegated administrative boundary | Verify that the target server denies delegated sessions on administrative routes while allowing permitted messaging. SDK configuration does not establish server authorization. |
+| Socket expiry recovery | Verify proactive renewal and any advertised `TOKEN_EXPIRED` behavior on the target deployment. An ambiguous revocation remains terminal. |
+| Staging and sustained pilot | Required before release-candidate or stable promotion, with agreed capacity and failure acceptance. |
 | Independent team acceptance | Team installs a versioned archive and runs the documented worker without SDK-team intervention; not yet observed. |
+
+The implemented authentication contract is HumChat-only `auth: { sdkKey, actAs }`. See the [login guide](SDK_KEY_LOGIN_GUIDE.md) for authentication and renewal, and the [message acceptance procedure](SDK_KEY_MESSAGE_ACCEPTANCE.md) for deployment checks. Each distributed archive needs its own validation manifest.
 
 After those gates close, make a reviewed release change: update version and lockfile together, write migration/changelog notes, record the supported SDK/server pair, resolve license/support metadata, and set registry/access deliberately. The current local release policy rejects stable versions and changed publication metadata until that policy itself is reviewed. There is no bypass flag.
 

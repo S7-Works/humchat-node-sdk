@@ -22,17 +22,24 @@ function report(error) {
 
 | Symptom | Check / action |
 | --- | --- |
-| `CONFIGURATION` at construction | Required `orgId`, HTTP(S) origin-only `baseUrl`, async `tokenProvider`, supported option names and positive integer limits. Unknown top-level options fail. |
-| `UNSUPPORTED_FEATURE` with `apiKey` | The preview has no verified machine-key exchange. Supply an authorized session provider; do not reinterpret the key as a session token. |
+| `CONFIGURATION` at construction | Required `orgId`, HTTP(S) origin-only `baseUrl`, an authentication mode, supported option names and positive integer limits. SDK-key mode requires HTTPS outside literal loopback development origins. Unknown top-level options fail. |
+| `VALIDATION` for authentication options | Use exactly one of `auth` or `tokenProvider`; omit the other property entirely. SDK-key mode validates key/email shape and canonical org UUID. |
+| `UNSUPPORTED_FEATURE` with `auth.sdkKey` | The login endpoint is absent (404/405), SDK-key capability is missing/disabled, or this is a detected browser context. Use a compatible HumChat backend from Node.js. |
+| Mint 401 / 403 | Invalid/revoked key or refused delegated login. The failure is latched for this client; verify the key's organization and permitted member, then construct a new client with valid credentials. |
+| Mint 502 / 503 | Login is unavailable. Bounded retries apply; 503 can mean configuration or upstream failure, so its text is not treated as a reliable distinction. |
+| `UNSUPPORTED_FEATURE` with `apiKey` | Bot API-key exchange is unsupported. Use `auth: { sdkKey, actAs }` for delegated member login or an authorized `tokenProvider`; do not reinterpret a key as a session token. |
 | `AUTHENTICATION` from a static environment token | The example does not renew tokens. Verify the supplied session and implement renewal inside the provider. Expiry values are Unix seconds. |
 | `AUTHENTICATION` after refresh | Replacement actor/org must match the already-bound client. Create a new client for a different principal; do not reuse its persistence identity. |
 | `UNSUPPORTED_FEATURE` during `connect()` | Server lacks capability discovery or send v1/state v1/history v2. Coordinate a server upgrade; disabling durable mode does not remove these HTTP requirements. |
 | `UNSUPPORTED_FEATURE` on subscription readiness | Upgrade to event protocol v1/durable replay, or explicitly choose best-effort mode and accept incomplete coverage. |
 | `VALIDATION` on a channel | Use `Channel.id` or `Conversation.channelId`; it must be a canonical key in the configured organization, within supported identifier bounds. |
+| `NOT_FOUND` / 404 from `channels.list()` | Confirm the intended workspace exists and supply its known team ID with `channels.list({ teamId })`. The SDK does not list all teams or bootstrap missing workspaces. Use `conversations.list()` for DM/group conversation channels. |
 | 403/404 | Confirm channel/team membership or guest grants and the exact routing key. Reconnect/retry does not create access. |
 | `SESSION_REVOKED` | All work on this client is blocked. Complete the application's authorized credential lifecycle and construct a new client. |
 
-The SDK does not perform OTP login or determine the correct ButtrBase refresh endpoint for your deployment. Production service identity, grants, key rotation and machine revocation remain **unverified**. Coordinate these with the deployment/authentication owners. See [Authentication](AUTHENTICATION.md).
+The SDK does not perform OTP login. Built-in SDK-key exchange contacts HumChat only and reuses the session cache and refresh coordination. Recovery from an explicit `TOKEN_EXPIRED` frame requires the server to advertise and implement that capability; ambiguous `session_revoked` stays terminal. See the [login guide](SDK_KEY_LOGIN_GUIDE.md) and [authentication guide](AUTHENTICATION.md).
+
+For a workspace 404, obtain the intended team ID from your HumChat administrator. A successful login or organization roster lookup does not establish that a workspace exists. Do not create or modify workspaces automatically as a discovery fallback.
 
 ## Writes, errors and repeated work
 
