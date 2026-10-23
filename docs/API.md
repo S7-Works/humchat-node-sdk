@@ -31,6 +31,10 @@ Identifiers are opaque, case-sensitive strings, not necessarily ULIDs. Supported
 | `close()` | Cancels requests, subscriptions and timers; does not close caller-owned stores or revoke credentials. |
 | `channels.list({ teamId? }?, options?)` | `{ orgId, teamId, teamName, channels }`; it is one team-scoped result, not an all-teams iterator. |
 | `conversations.list(options?)` | `Conversation[]`; use `channelId` for messages. |
+| `members.list(options?)` | Organization roster `{ actorId, name, email, role, status }[]`. |
+| `conversations.create({ memberIds, name? }, options?)` | Create/reuse a conversation; creation is not automatically retried. |
+| `conversations.openDirect({ memberId }, options?)` | Find an unnamed exact peer DM or ask the server to create/reuse it. |
+| `inbox.watch(handler, { consumerId, checkpointStore, pollIntervalMs?, maxConversations? })` | Managed discovery and acknowledged consumption across the identity's conversations. See [direct messages](DIRECT_MESSAGES.md). |
 
 ```js
 const { channels } = await client.channels.list();
@@ -41,13 +45,14 @@ for (const conversation of conversations) {
 }
 ```
 
-`Channel` contains `id`, `orgId`, `teamId`, `slug`, `displayName`, `isPrivate`. `Conversation` contains management `id`, messaging `channelId`, `name`, `kind`, `memberCount`, `myRole`, `members`, `lastMessageAt`. These resources do not create channels, conversations or membership grants.
+`Channel` contains `id`, `orgId`, `teamId`, `slug`, `displayName`, `isPrivate`. `Conversation` contains management `id`, messaging `channelId`, `name`, `kind`, `memberCount`, `myRole`, `members`, `lastMessageAt`. Workspace channel creation and independent membership administration are not exposed.
 
 ## Send, reply and mutate
 
 | Method | Input / result |
 | --- | --- |
 | `messages.send(input, options?)` | `{ channelId, content, id?, threadRootId?, priority? }` → `SendReceipt`. Options also allow `idempotencyKey`. |
+| `messages.sendDirect(input, options?)` | `{ recipientId, content, id?, threadRootId?, priority? }` → `{ conversation, receipt }`. Uses `openDirect` followed by the normal send. |
 | `messages.reply(reference, input, options?)` | Reference `{ id, channelId, threadRootId? }`; input `{ content, id?, priority? }` → `SendReceipt`. |
 | `messages.getState({ channelId, messageId }, options?)` | Current full `MessageState`. |
 | `messages.edit(input, options?)` | `{ channelId, messageId, content, expectedRevision, operationId? }` → `MutationReceipt`. |

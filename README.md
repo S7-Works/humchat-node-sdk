@@ -1,6 +1,6 @@
 # HumChat Node.js SDK — durable delivery preview
 
-`@humchat/node` is a backend TypeScript SDK for sending and receiving HumChat messages. Version `0.1.0-alpha.6` provides typed messaging, optional shared WebSockets, durable event replay, acknowledged consumers, persistent checkpoints, a send outbox and signed outgoing webhooks. Production service authentication remains dependent on the verified ButtrBase contract.
+`@humchat/node` is a backend TypeScript SDK for sending and receiving HumChat messages. Version `0.1.0-alpha.7` adds recipient lookup, direct-message helpers and a managed conversation inbox alongside typed messaging, optional shared WebSockets, durable replay, persistent checkpoints, a send outbox and signed outgoing webhooks. Production service authentication remains dependent on the verified ButtrBase contract.
 
 The source is public at [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk). The npm package remains unpublished and marked `private: true`. Licensing is pending: [LICENSE](LICENSE) remains `UNLICENSED`, with no open-source license granted.
 
@@ -15,11 +15,13 @@ npm ci
 npm run release:prepare
 ```
 
-The command prints a unique `target/release/release-*` directory containing `humchat-node-0.1.0-alpha.6.tgz`, its SHA-256 and a validation manifest. Install a reviewed archive into your backend using `npm install <path-to-tarball>`. Registry publication is disabled. S7 Works is the intended future npm organization owner; its exact scope, registry access, license and support/security ownership remain unconfirmed.
+The command prints a unique `target/release/release-*` directory containing `humchat-node-0.1.0-alpha.7.tgz`, its SHA-256 and a validation manifest. Install a reviewed archive into your backend using `npm install <path-to-tarball>`. Registry publication is disabled. S7 Works is the intended future npm organization owner; its exact scope, registry access, license and support/security ownership remain unconfirmed.
 
 For a supplied tarball, begin with the [runnable examples](examples/README.md). The package includes [authentication](docs/AUTHENTICATION.md), [reliability](docs/RELIABILITY.md), [shared connections](docs/MULTIPLEX.md), [API reference](docs/API.md), [migration](docs/MIGRATION.md), [troubleshooting](docs/TROUBLESHOOTING.md), [support](docs/SUPPORT.md), and [release preparation](docs/RELEASING.md) guides. They remain usable after installation outside this repository.
 
 ## Configure and send
+
+For person-to-person messaging, use `members.list()`, `conversations.openDirect({ memberId })`, or `messages.sendDirect({ recipientId, content })`. `inbox.watch(handler, { consumerId, checkpointStore })` discovers conversations belonging to the authenticated identity and consumes retained/new events with per-channel checkpoints. It includes new DMs and groups, with polling and explicit limits. See the [direct-message guide](docs/DIRECT_MESSAGES.md) and [runnable responder](examples/dm-responder.mjs). The lower-level channel API below remains available.
 
 ```ts
 import { HumChat, ConflictError, HumChatError } from '@humchat/node';

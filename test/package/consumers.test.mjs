@@ -245,7 +245,7 @@ test('packed package works for independent ESM, CJS and strict TypeScript consum
   for (const file of ['package.json', 'dist/index.js', 'dist/index.cjs', 'dist/index.d.ts', 'dist/index.d.cts', 'README.md', 'LICENSE',
     'examples/send.mjs', 'examples/list-channels.mjs', 'examples/react.mjs', 'examples/thread-responder.mjs', 'examples/durable-responder.mjs',
     'examples/send-and-list.cjs', 'examples/multi-channel-worker.mjs', 'examples/durable-worker.mjs', 'examples/README.md', 'examples/multiplex-worker.mjs',
-    'examples/webhook-receiver.mjs', 'examples/webhook-inbox.mjs', 'docs/WEBHOOKS.md']) {
+    'examples/webhook-receiver.mjs', 'examples/webhook-inbox.mjs', 'docs/WEBHOOKS.md', 'examples/dm-responder.mjs', 'docs/DIRECT_MESSAGES.md']) {
     assert.ok(paths.includes(file), 'Required package file missing: ' + file);
   }
   assert.ok(!paths.some(path => /^(?:src|test|scripts|contract|node_modules)\//.test(path)), 'Package must exclude development files');
@@ -431,6 +431,24 @@ async function webhookManagement() {
   void list; void deleted; void event; void schemaVersions;
 }
 void webhookManagement;
+async function directMessaging(store: import('@humchat/node').CheckpointStore) {
+  const roster: import('@humchat/node').OrgMember[] = await client.members.list();
+  const conversation: import('@humchat/node').Conversation = await client.conversations.openDirect({memberId: 'peer'});
+  await client.conversations.create({memberIds: ['peer'], name: 'Group'});
+  const result: import('@humchat/node').DirectSendReceipt = await client.messages.sendDirect({recipientId: 'peer', content: 'hello'});
+  const inbox: import('@humchat/node').InboxWatch = client.inbox.watch(async (event, context) => {
+    const id: string = event.state.id; const signal: AbortSignal = context.signal; void id; void signal;
+  }, {consumerId: 'consumer', checkpointStore: store, pollIntervalMs: 5000, maxConversations: 20});
+  const status: import('@humchat/node').InboxStatus = inbox.status;
+  const stats: import('@humchat/node').InboxStats = inbox.getStats();
+  await inbox.ready; await inbox.refresh(); await inbox.close(); await inbox.done;
+  void roster; void conversation; void result; void status; void stats;
+}
+void directMessaging;
+// @ts-expect-error inbox consumers require a checkpoint store
+client.inbox.watch(async () => {}, {consumerId: 'consumer'});
+// @ts-expect-error direct sending addresses an actor ID, not an email field
+client.messages.sendDirect({email: 'peer@example.invalid', content: 'hello'});
 // @ts-expect-error create requires a stable caller UUID for reconciliation
 client.webhooks.create({url: 'https://receiver.example.invalid/humchat', channelIds: ['fixture-org:team:general']});
 // @ts-expect-error filter status is a known delivery state

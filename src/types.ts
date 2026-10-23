@@ -27,6 +27,11 @@ export interface Conversation {
   id: string; channelId: string; name: string | null; kind: string; memberCount: number;
   myRole: string; members: Array<{ actorId: string; role: string }>; lastMessageAt: number | null;
 }
+export interface OrgMember { actorId: string; name: string; email: string; role: string; status: string }
+export interface CreateConversationInput { memberIds: string[]; name?: string }
+export interface OpenDirectInput { memberId: string }
+export interface SendDirectInput { recipientId: string; content: string; id?: string; threadRootId?: string | null; priority?: MessagePriority }
+export interface DirectSendReceipt { conversation: Conversation; receipt: SendReceipt }
 export interface MessageAttachment {
   ordinal: number; uploadId: string | null; contentHash: string | null;
   fileName: string | null; mediaType: string | null; byteLength: number | null;

@@ -8,6 +8,7 @@ export const requiredFiles = [
   'docs/TROUBLESHOOTING.md', 'docs/RELEASING.md', 'docs/SUPPORT.md', 'docs/MULTIPLEX.md',
   'examples/README.md', 'examples/multiplex-worker.mjs',
   'docs/WEBHOOKS.md', 'examples/webhook-receiver.mjs', 'examples/webhook-inbox.mjs',
+  'docs/DIRECT_MESSAGES.md', 'examples/dm-responder.mjs',
 ];
 
 export function validateMetadata(pkg, lock) {

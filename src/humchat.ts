@@ -9,6 +9,8 @@ import { RealtimeClient } from './realtime/manager.js';
 import { EventsResource } from './resources/events.js';
 import { OutboxResource } from './resources/outbox.js';
 import { WebhooksResource } from './resources/webhooks.js';
+import { MembersResource } from './resources/members.js';
+import { InboxResource } from './resources/inbox.js';
 import type { Identity, RequestOptions, ResourceContext } from './types.js';
 
 /** Backend HTTP and channel WebSocket preview. Construction performs no network IO. */
@@ -20,6 +22,8 @@ export class HumChat {
   readonly events: EventsResource;
   readonly outbox: OutboxResource;
   readonly webhooks: WebhooksResource;
+  readonly members: MembersResource;
+  readonly inbox: InboxResource;
   #config: ResolvedConfig;
   #closed = new AbortController();
   #http: HttpTransport;
@@ -36,10 +40,12 @@ export class HumChat {
       request: (path, options) => this.request(path, options),
     };
     this.channels = new ChannelsResource(context);
-    this.conversations = new ConversationsResource(context);
-    this.messages = new MessagesResource(context);
+    this.members = new MembersResource(context);
+    this.conversations = new ConversationsResource(context, this.#config.retry.totalTimeoutMs);
+    this.messages = new MessagesResource(context, this.conversations, this.#config.retry.totalTimeoutMs);
     this.events = new EventsResource(context, options => this.getCapabilities(options), this.#config.retry.totalTimeoutMs);
     this.realtime = new RealtimeClient(this.#config, this.#sessions, this.messages, this.events);
+    this.inbox = new InboxResource(context, this.conversations, this.realtime, options => this.getCapabilities(options));
     this.outbox = new OutboxResource(this.#config.baseUrl, options => this.connect(options), this.messages);
     this.webhooks = new WebhooksResource(context, options => this.getCapabilities(options), this.#config.retry.totalTimeoutMs);
   }
@@ -66,6 +72,7 @@ export class HumChat {
   /** Cancel this client's work. Does not log out or revoke the caller's shared token. */
   async close(): Promise<void> {
     this.#closed.abort(new AbortError('Client is closed'));
+    await this.inbox.close();
     await this.realtime.close();
   }
 

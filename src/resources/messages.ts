@@ -1,12 +1,13 @@
 import { monotonicFactory } from 'ulid';
 import { z } from 'zod';
 import { ProtocolError } from '../errors.js';
-import { withIntent } from '../http/transport.js';
+import { budget, withIntent } from '../http/transport.js';
+import type { ConversationsResource } from './conversations.js';
 import { assertScope, bodySchema, cursorWireSchema, emojiSchema, identitySchema, input, parseCursor,
   parseHistory, parseMutation, parseSendReceipt, parseState, prioritySchema, revisionSchema, validateChannel } from '../protocol/wire.js';
 import type { DeleteMessageInput, EditMessageInput, HistoryInput, HistoryPage, MessageLocator,
   MessageReference, MessageState, MutationReceipt, ReplyInput, RequestOptions, ResourceContext,
-  SendMessageInput, SendOptions, SendReceipt, SetReactionInput } from '../types.js';
+  SendMessageInput, SendOptions, SendReceipt, SetReactionInput, SendDirectInput, DirectSendReceipt } from '../types.js';
 
 const nextId = monotonicFactory();
 const locator = { channelId: identitySchema(1024), messageId: identitySchema() };
@@ -17,7 +18,25 @@ type Mutation = { kind: 'edit'; body: string; expected_revision: number }
   | { kind: 'set_reaction'; emoji: string; present: boolean };
 
 export class MessagesResource {
-  constructor(private readonly context: ResourceContext) {}
+  constructor(private readonly context: ResourceContext, private readonly conversations: ConversationsResource,
+    private readonly totalTimeoutMs: number) {}
+
+  async sendDirect(params: SendDirectInput, options: SendOptions = {}): Promise<DirectSendReceipt> {
+    const value = input(z.object({ recipientId: identitySchema(256), content: bodySchema,
+      id: identitySchema().optional(), threadRootId: identitySchema().nullable().optional(),
+      priority: prioritySchema.optional() }).strict(), params, 'direct send input');
+    input(identitySchema(), options.idempotencyKey ?? value.id ?? 'generated', 'idempotencyKey');
+    const operation = budget(this.totalTimeoutMs, options.signal ? [options.signal] : []);
+    const request = { ...options, signal: operation.signal };
+    try {
+      const conversation = await this.conversations.openDirect({ memberId: value.recipientId }, request);
+      const receipt = await this.send({ content: value.content, channelId: conversation.channelId,
+        ...(value.id === undefined ? {} : { id: value.id }),
+        ...(value.threadRootId === undefined ? {} : { threadRootId: value.threadRootId }),
+        ...(value.priority === undefined ? {} : { priority: value.priority }) }, request);
+      return { conversation, receipt };
+    } finally { operation.dispose(); }
+  }
 
   async send(params: SendMessageInput, options: SendOptions = {}): Promise<SendReceipt> {
     const value = input(z.object({ channelId: identitySchema(1024), content: bodySchema,

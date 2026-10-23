@@ -1,4 +1,6 @@
 export { HumChat } from './humchat.js';
+export { InboxWatch } from './resources/inbox.js';
+export type { InboxWatchOptions, InboxStatus, InboxStats } from './resources/inbox.js';
 export type { HumChatOptions, SafeConfig, RetryOptions, RealtimeOptions, RecoveryOptions, TokenProvider, TokenProviderContext, TokenResult } from './config.js';
 export { ChannelSubscription } from './realtime/subscription.js';
 export type { EventListener } from './realtime/subscription.js';
@@ -16,5 +18,5 @@ export type {
   RequestOptions, SendOptions, Identity, MessagePriority, Channel, ChannelList, ChannelListInput,
   Conversation, MessageAttachment, MessageReference, MessageState, SendMessageInput, ReplyInput,
   MessageLocator, SendReceipt, HistoryInput, HistoryPage, EditMessageInput, DeleteMessageInput,
-  SetReactionInput, MutationReceipt,
+  SetReactionInput, MutationReceipt, OrgMember, CreateConversationInput, OpenDirectInput, SendDirectInput, DirectSendReceipt,
 } from './types.js';

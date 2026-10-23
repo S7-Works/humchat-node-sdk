@@ -1,6 +1,6 @@
 # Release preparation and publication
 
-The current output is a locally built `0.1.0-alpha.6` tarball. Source is public in [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk); no npm version is published. The package remains `private: true` and `UNLICENSED`. Production machine authentication, staging acceptance and the agreed 24-hour pilot remain open. Public source visibility does not establish production readiness or an open-source license.
+The current output is a locally built `0.1.0-alpha.7` tarball. Source is public in [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk); no npm version is published. The package remains `private: true` and `UNLICENSED`. Production machine authentication, staging acceptance and the agreed 24-hour pilot remain open. Public source visibility does not establish production readiness or an open-source license.
 
 ## Prepare a local artifact
 
@@ -17,14 +17,14 @@ The command prints a unique `target/release/release-*` directory containing:
 
 | Output | Purpose |
 | --- | --- |
-| `humchat-node-0.1.0-alpha.6.tgz` | Installable package with compiled outputs, documentation and examples. |
+| `humchat-node-0.1.0-alpha.7.tgz` | Installable package with compiled outputs, documentation and examples. |
 | `SHA256SUMS` | Archive hash for transfer verification. |
 | `release-manifest.json` | Runtime, package identity, packed file/source hashes, check results and open publication gates. `passed: true` means local validation passed. |
 | `logs/` and `consumers/` | Local validation evidence; these are not part of the npm tarball. |
 
 On failure, the manifest remains with `passed: false`; do not distribute its tarball. Every run uses a fresh directory. A dirty checkout is allowed for local review and recorded; its source hashes identify the inputs. It is not a clean-checkout release attestation. CI uses a fresh checkout and `npm ci`. The release manifest is evidence about validation, not cryptographic publisher identity or npm provenance.
 
-To verify a supplied archive, compare its SHA-256 with `SHA256SUMS`, then install it with `npm install /path/to/humchat-node-0.1.0-alpha.6.tgz`. Run the [examples](../examples/README.md) against an approved local or pilot environment using caller-managed tokens. Do not use `npm install @humchat/node` until an actual registry release exists.
+To verify a supplied archive, compare its SHA-256 with `SHA256SUMS`, then install it with `npm install /path/to/humchat-node-0.1.0-alpha.7.tgz`. Run the [examples](../examples/README.md) against an approved local or pilot environment using caller-managed tokens. Do not use `npm install @humchat/node` until an actual registry release exists.
 
 ## Repository workflow
 

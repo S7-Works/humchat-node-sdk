@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.7 - 2026-10-23
+
+- Added organization member lookup, conversation creation, exact-peer DM lookup and direct-send helpers.
+- Added a managed conversation inbox with bounded discovery polling, earliest-retained recovery, persistent per-channel checkpoints, explicit capacity/errors and cancellable lifecycle.
+- Added a persistent DM responder example and controlled coverage for first-message recovery, restart, membership changes and failures. Existing SDK capability negotiation remains required.
+- Conversation creation is not automatically retried; machine authentication, production acceptance, licensing and npm publication remain open.
+
 ## Standalone repository - 2026-10-20
 
 - Published the SDK source in a separate S7 Works repository, without the HumChat server or its repository history.
