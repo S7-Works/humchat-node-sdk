@@ -39,7 +39,7 @@ Validation against a real HumChat deployment and an independent team's pilot rem
 | Package scope and registry ownership | S7 Works is the intended company npm owner. `@humchat/node` remains provisional; the exact company scope, availability and maintainer permissions are unverified. |
 | Public versus restricted npm access | Unassigned. The GitHub repository is public; `private: true` still prevents npm publication. |
 | License | `UNLICENSED`; owner decision pending. Public source visibility does not grant an open-source license. |
-| Support/security owner | Public issues accept nonsensitive questions; dedicated security contact and support commitments remain unassigned. See [support](SUPPORT.md). |
+| Support/security owner | [Public issues](https://github.com/S7-Works/humchat-node-sdk/issues) accept nonsensitive questions; [private vulnerability reporting](https://github.com/S7-Works/humchat-node-sdk/security/advisories/new) is enabled for repository maintainers. A named response owner and support commitments remain unassigned. See [support](SUPPORT.md). |
 | Production member messaging | Run the designated two-member DM/reply test and verify both messages in the HumChat app. This acceptance remains pending. |
 | Delegated administrative boundary | Verify that the target server denies delegated sessions on administrative routes while allowing permitted messaging. SDK configuration does not establish server authorization. |
 | Socket expiry recovery | Verify proactive renewal and any advertised `TOKEN_EXPIRED` behavior on the target deployment. An ambiguous revocation remains terminal. |
