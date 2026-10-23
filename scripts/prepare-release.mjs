@@ -19,7 +19,9 @@ await mkdir(join(output, 'logs'));
 const report = { schema: 1, startedAt: new Date().toISOString(), passed: false,
   node: process.version, platform: process.platform, arch: process.arch, checks: [],
   publication: { enabled: false, distribution: 'private local tarball',
-    openGates: ['M1 verified machine authentication', 'M5 staging and agreed 24-hour pilot',
+    openGates: ['production direct-message send/reply and HumChat app verification',
+      'server delegated-token administrative restrictions', 'server expiry-companion build and deployment acceptance',
+      'staging and agreed 24-hour pilot',
       'npm scope ownership and registry/access decision', 'license and support/security ownership', 'external-team acceptance'] } };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sourceRoots = ['src', 'scripts', 'test', 'examples', 'docs', 'contract'];

@@ -30,9 +30,10 @@ export class HumChat {
   #sessions: SessionManager;
 
   constructor(options: HumChatOptions) {
-    this.#config = resolveConfig(options);
-    this.#http = new HttpTransport(this.#config);
-    this.#sessions = new SessionManager(this.#config, this.#http, this.#closed.signal);
+    const { config, sdkKeyAuth } = resolveConfig(options);
+    this.#config = config;
+    this.#http = new HttpTransport(config, value => sdkKeyAuth !== undefined && value.includes(sdkKeyAuth.sdkKey));
+    this.#sessions = new SessionManager(config, this.#http, this.#closed.signal, sdkKeyAuth);
     const context: ResourceContext = {
       orgId: this.#config.orgId,
       connect: options => this.connect(options),

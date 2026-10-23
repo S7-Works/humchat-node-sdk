@@ -1,8 +1,8 @@
-import type { ResolvedConfig } from '../config.js';
+import type { ResolvedConfig, SdkKeyAuthOptions, TokenResult } from '../config.js';
 import { parseGap } from '../realtime/durable-protocol.js';
 import {
   AbortError, AuthenticationError, ConflictError, HumChatError, NetworkError, NotFoundError,
-  PermissionError, ProtocolError, RateLimitError, ServerError, TimeoutError, ValidationError,
+  PermissionError, ProtocolError, RateLimitError, ServerError, TimeoutError, UnsupportedFeatureError, ValidationError,
   type HumChatErrorOptions,
 } from '../errors.js';
 
@@ -32,7 +32,7 @@ export function budget(milliseconds: number, signals: AbortSignal[] = []): { sig
   const timer = setTimeout(() => controller.abort(new TimeoutError('Operation deadline exceeded', { retryable: true })), milliseconds);
   return { signal: AbortSignal.any([...signals, controller.signal]), dispose: () => clearTimeout(timer) };
 }
-function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+export function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(aborted(signal));
   return new Promise((resolve, reject) => {
     const cancel = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(aborted(signal)); };
@@ -58,11 +58,11 @@ export function withIntent(error: unknown, options: HttpOptions): HumChatError {
   return result;
 }
 const transient = new Set([408, 429, 502, 503, 504]);
-function statusError(response: Response, token: string): HumChatError {
+function statusError(response: Response, isSensitive: (value: string) => boolean, mint: boolean): HumChatError {
   const status = response.status;
   const requestId = response.headers.get('x-request-id');
   const options: HumChatErrorOptions = { status, retryable: transient.has(status) };
-  if (requestId && /^[\w.:-]{1,128}$/.test(requestId) && !requestId.includes(token)) options.requestId = requestId;
+  if (requestId && /^[\w.:-]{1,128}$/.test(requestId) && !isSensitive(requestId)) options.requestId = requestId;
   const retryAfter = response.headers.get('retry-after');
   if (retryAfter !== null) {
     const numeric = /^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter) * 1_000 : Date.parse(retryAfter) - Date.now();
@@ -70,10 +70,11 @@ function statusError(response: Response, token: string): HumChatError {
   }
   if (status === 401) return new AuthenticationError('Authentication rejected', options);
   if (status === 403) return new PermissionError('Permission denied', options);
+  if (mint && (status === 404 || status === 405)) return new UnsupportedFeatureError('Server does not support SDK-key login', options);
   if (status === 404) return new NotFoundError('Resource not found', options);
   if (status === 409) return new ConflictError('Operation conflicts with existing state or intent', options);
   if (status === 429) return new RateLimitError('Rate limit exceeded', options);
-  if (status === 400 || status === 422) return new ValidationError('Server rejected request input', options);
+  if (status === 400 || status === 422 || (mint && (status === 413 || status === 415))) return new ValidationError('Server rejected request input', options);
   if (status === 408) return new TimeoutError('Server request timeout', options);
   if (status >= 500) return new ServerError('Server request failed', options);
   return new ProtocolError('Unexpected HTTP status', options);
@@ -82,13 +83,61 @@ function statusError(response: Response, token: string): HumChatError {
 /** Fetch-only transport. Credentials are supplied by the verified session manager. */
 export class HttpTransport {
   #cooldownUntil = 0;
-  constructor(private readonly config: ResolvedConfig) {}
+  #isSensitive: (value: string) => boolean;
+  #credentials = new Set<string>();
+  #omitRequestIds = false;
+  constructor(private readonly config: ResolvedConfig, isSensitive: (value: string) => boolean = () => false) {
+    this.#isSensitive = isSensitive;
+  }
+
+  private rememberCredential(value: string): void {
+    // Only credentials this short can fit in the bounded request-ID header.
+    if (this.#omitRequestIds || !value || value.length > 128 || this.#credentials.has(value)) return;
+    // Never forget an old credential while continuing to expose remote IDs.
+    // Long-lived clients fail closed once the bounded redaction history fills.
+    if (this.#credentials.size >= 128) {
+      this.#credentials.clear();
+      this.#omitRequestIds = true;
+    } else this.#credentials.add(value);
+  }
+
+  private sensitiveRequestId(value: string): boolean {
+    return this.#omitRequestIds || this.#isSensitive(value) ||
+      [...this.#credentials].some(credential => value.includes(credential));
+  }
 
   async request(path: string, token: string, options: HttpOptions, signal: AbortSignal): Promise<unknown> {
+    return (await this.execute(path, { token }, options, signal)).value;
+  }
+
+  /** Bootstrap only at this fixed same-origin endpoint; never follow a credential redirect. */
+  async mintSdkKey(auth: Readonly<SdkKeyAuthOptions>, signal: AbortSignal): Promise<TokenResult> {
+    const result = await this.execute('/api/sdk/auth/user-token', { sdkKey: auth.sdkKey }, {
+      method: 'POST', body: { org_uuid: this.config.orgId, email: auth.actAs, expires_in: 900 },
+      // Retrying login can issue another short-lived token; it does not mutate messaging state.
+      replaySafe: true,
+    }, signal);
+    const value = result.value as Record<string, unknown> | null;
+    // Remember even unusable/expired results before verification can reject them.
+    if (value && typeof value.access_token === 'string') this.rememberCredential(value.access_token);
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        typeof value.access_token !== 'string' || !/^[\x21-\x7e]+$/.test(value.access_token) ||
+        value.access_token.startsWith('hsk_') || value.access_token.includes(auth.sdkKey) ||
+        typeof value.token_type !== 'string' || value.token_type.toLowerCase() !== 'bearer' ||
+        typeof value.expires_in !== 'number' || !Number.isSafeInteger(value.expires_in) || value.expires_in < 1 || value.expires_in > 3600) {
+      throw new ProtocolError('Invalid SDK-key token response');
+    }
+    // Count latency against validity; never extend a token's lifetime by response duration.
+    return { token: value.access_token, expiresAt: Math.floor(result.requestedAt / 1000) + value.expires_in };
+  }
+
+  private async execute(path: string, credential: { token: string } | { sdkKey: string }, options: HttpOptions,
+    signal: AbortSignal): Promise<{ value: unknown; requestedAt: number }> {
     const timeout = requestTimeout(options, this.config);
     const method = options.method ?? 'GET';
     const replaySafe = method === 'GET' || options.replaySafe === true;
     const body = options.body === undefined ? undefined : JSON.stringify(options.body);
+    this.rememberCredential('sdkKey' in credential ? credential.sdkKey : credential.token);
     for (let attempt = 0; ; attempt++) {
       try {
         await delay(Math.max(0, this.#cooldownUntil - Date.now()), signal);
@@ -96,10 +145,17 @@ export class HttpTransport {
         const attemptBudget = budget(timeout, [signal]);
         try {
           const headers = new Headers(options.headers);
-          headers.set('Authorization', `Bearer ${token}`);
+          const mint = 'sdkKey' in credential;
+          if (mint) {
+            headers.delete('Authorization');
+            headers.set('X-HumChat-Sdk-Key', credential.sdkKey);
+          } else {
+            headers.set('Authorization', `Bearer ${credential.token}`);
+          }
           headers.set('Accept', 'application/json');
           if (body !== undefined) headers.set('Content-Type', 'application/json');
           let response: Response;
+          const requestedAt = Date.now();
           try {
             response = await raceSignal(this.config.fetch(new URL(path, this.config.baseUrl), {
               method, headers, ...(body === undefined ? {} : { body }), signal: attemptBudget.signal, redirect: 'error',
@@ -113,13 +169,13 @@ export class HttpTransport {
               throw parseGap(await this.readJson(response, attemptBudget.signal), this.config.orgId, options.channelId);
             }
             void response.body?.cancel().catch(() => {});
-            const error = statusError(response, token);
+            const error = statusError(response, value => this.sensitiveRequestId(value), mint);
             if (error instanceof RateLimitError && error.retryAfterMs !== undefined) {
               this.#cooldownUntil = Math.max(this.#cooldownUntil, Date.now() + error.retryAfterMs);
             }
             throw error;
           }
-          return await this.readJson(response, attemptBudget.signal);
+          return { value: await this.readJson(response, attemptBudget.signal), requestedAt };
         } finally { attemptBudget.dispose(); }
       } catch (failure) {
         const error = withIntent(signal.aborted ? aborted(signal) : failure, options);

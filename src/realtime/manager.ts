@@ -97,6 +97,15 @@ export class RealtimeClient {
     }
     this.multiplex?.block(new SessionRevokedError('Session ended; automatic reconnect is disabled'));
   }
+  /** @internal Returns true only when an explicitly negotiated expiry permits reconnect. */
+  endSession(frame: Extract<ParsedFrame, { kind: 'sessionRevoked' | 'sessionExpired' }>, session: VerifiedSession): boolean {
+    if (frame.kind === 'sessionExpired' && session.capabilities.authentication.socketSessionEndCodes.includes('TOKEN_EXPIRED')) {
+      this.sessions.expire(session);
+      return true;
+    }
+    this.revoke(frame.kind === 'sessionRevoked' ? frame.reason : 'session no longer valid');
+    return false;
+  }
   /** @internal */ async acquire(signal: AbortSignal): Promise<() => void> {
     if (signal.aborted) throw aborted(signal);
     if (this.#slots >= this.config.realtime.connectConcurrency) {
@@ -293,7 +302,10 @@ class ChannelWorker implements SubscriptionOwner {
           const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
           const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
           const frame = parseFrame(raw, this.manager.config.orgId, this.channelId);
-          if (frame.kind === 'sessionRevoked') { this.manager.revoke(frame.reason); return; }
+          if (frame.kind === 'sessionRevoked' || frame.kind === 'sessionExpired') {
+            if (this.manager.endSession(frame, session)) this.fail(new NetworkError('Socket token expired; reconnecting with a fresh session', { retryable: true }));
+            return;
+          }
           if (frame.kind === 'resync') { void this.resync(); return; }
           this.enqueue(frame, bytes.byteLength, generation);
         } catch (error) {
@@ -349,7 +361,7 @@ class ChannelWorker implements SubscriptionOwner {
         this.#session = session;
         this.scheduleRefresh(generation);
       } catch (error) {
-        if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.block(withIntent(error, { channelId: this.channelId })); }
+        if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.fail(withIntent(error, { channelId: this.channelId })); }
       }
     })(); }, delay);
   }

@@ -108,6 +108,7 @@ export function parseFrame(raw: unknown, orgId: string, channelId: string): Pars
   if (kind === 'session_revoked') {
     read(z.object({reason: text(1024)}).passthrough(), value);
     bound(value, orgId, channelId, false);
+    if (value.code === 'TOKEN_EXPIRED') return { kind: 'sessionExpired' };
     // Do not turn arbitrary server strings into logs; the known wire reasons are benign constants.
     const reason = value.reason === 'session deprovisioned' || value.reason === 'session no longer valid' || value.reason === 'session expired'
       ? value.reason : 'session revoked';

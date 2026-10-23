@@ -265,7 +265,13 @@ export class DurableChannelWorker implements SubscriptionOwner {
           const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
           const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
           const kind = (raw as { type?: unknown })?.type;
-          if (kind === 'session_revoked') { const frame = parseFrame(raw, this.manager.config.orgId, this.channelId); if (frame.kind === 'sessionRevoked') this.manager.revoke(frame.reason); return; }
+          if (kind === 'session_revoked') {
+            const frame = parseFrame(raw, this.manager.config.orgId, this.channelId);
+            if ((frame.kind === 'sessionRevoked' || frame.kind === 'sessionExpired') && this.manager.endSession(frame, session)) {
+              fail(new NetworkError('Socket token expired; reconnecting with a fresh session', { retryable: true }));
+            }
+            return;
+          }
           if (!gotReady) {
             const ready = parseReady(raw, this.manager.config.orgId, this.channelId);
             gotReady = true; settled = true; this.#target = ready.cursor; cleanup(); resolve(ready); return;
@@ -318,7 +324,7 @@ export class DurableChannelWorker implements SubscriptionOwner {
         if (!this.current(generation)) return;
         if (session.token !== this.#session?.token) this.rotate(session);
         else { this.#session = session; this.scheduleRefresh(generation); }
-      } catch (error) { if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.block(withIntent(error, { channelId: this.channelId })); } }
+      } catch (error) { if (this.current(generation)) { this.manager.counters.authRefreshFailures++; this.fail(withIntent(error, { channelId: this.channelId })); } }
       finally { lifetime.dispose(); }
     })(); }, Math.min(60_000, Math.max(1, this.#session.refreshAt * 1000 - Date.now())));
   }

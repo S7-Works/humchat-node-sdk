@@ -1,6 +1,8 @@
 # HumChat Node.js SDK — durable delivery preview
 
-`@humchat/node` is a backend TypeScript SDK for sending and receiving HumChat messages. Version `0.1.0-alpha.7` adds recipient lookup, direct-message helpers and a managed conversation inbox alongside typed messaging, optional shared WebSockets, durable replay, persistent checkpoints, a send outbox and signed outgoing webhooks. Production service authentication remains dependent on the verified ButtrBase contract.
+`@humchat/node` is a backend TypeScript SDK for sending and receiving HumChat messages. The `0.1.0-alpha.8` local review preview adds HumChat SDK-key login and automatic renewal to recipient lookup, direct-message helpers, a managed conversation inbox, optional shared WebSockets, durable replay, persistent checkpoints and a send outbox.
+
+Preview status: `auth: { sdkKey, actAs }` logs in through HumChat, caches and renews tokens, shares acquisition across callers, verifies the member identity and backs off during outages. Existing `tokenProvider` authentication continues to work. Login and proactive socket renewal passed read-only production checks; send, receive and threaded replies passed local synthetic-peer tests. Production message/app acceptance, delegated-admin restrictions, the server expiry-code companion and the pilot remain open. This version is prepared for review, not a production acceptance or npm publication milestone. See the [login guide](docs/SDK_KEY_LOGIN_GUIDE.md) and [release gates](docs/RELEASING.md).
 
 The source is public at [S7-Works/humchat-node-sdk](https://github.com/S7-Works/humchat-node-sdk). The npm package remains unpublished and marked `private: true`. Licensing is pending: [LICENSE](LICENSE) remains `UNLICENSED`, with no open-source license granted.
 
@@ -15,11 +17,36 @@ npm ci
 npm run release:prepare
 ```
 
-The command prints a unique `target/release/release-*` directory containing `humchat-node-0.1.0-alpha.7.tgz`, its SHA-256 and a validation manifest. Install a reviewed archive into your backend using `npm install <path-to-tarball>`. Registry publication is disabled. S7 Works is the intended future npm organization owner; its exact scope, registry access, license and support/security ownership remain unconfirmed.
+The command prints a unique `target/release/release-*` directory containing `humchat-node-0.1.0-alpha.8.tgz`, its SHA-256 and a validation manifest. Install a reviewed archive into your backend using `npm install <path-to-tarball>`. Registry publication is disabled. S7 Works is the intended future npm organization owner; its exact scope, registry access, license and support/security ownership remain unconfirmed.
 
 For a supplied tarball, begin with the [runnable examples](examples/README.md). The package includes [authentication](docs/AUTHENTICATION.md), [reliability](docs/RELIABILITY.md), [shared connections](docs/MULTIPLEX.md), [API reference](docs/API.md), [migration](docs/MIGRATION.md), [troubleshooting](docs/TROUBLESHOOTING.md), [support](docs/SUPPORT.md), and [release preparation](docs/RELEASING.md) guides. They remain usable after installation outside this repository.
 
 ## Configure and send
+
+For delegated member login in alpha.8, use an SDK key created by your organization administrator in HumChat:
+
+```ts
+import { HumChat } from '@humchat/node';
+
+const humchat = new HumChat({
+  orgId: process.env.HUMCHAT_ORG_ID!,
+  baseUrl: process.env.HUMCHAT_BASE_URL!,
+  auth: {
+    sdkKey: process.env.HUMCHAT_SDK_KEY!,
+    actAs: process.env.HUMCHAT_ACT_AS!,
+  },
+});
+try {
+  await humchat.connect();
+  await humchat.messages.sendDirect({
+    recipientId: process.env.HUMCHAT_RECIPIENT_ID!, content: 'Hello from my backend.',
+  });
+} finally {
+  await humchat.close();
+}
+```
+
+The SDK contacts only `baseUrl`. Keep the key server-side; it can act as members of its organization. Use messaging, channels, history and sockets with these delegated credentials; admin authorization must be enforced by the server. The following advanced example keeps the existing caller-managed `tokenProvider` mode. Configure exactly one mode.
 
 For person-to-person messaging, use `members.list()`, `conversations.openDirect({ memberId })`, or `messages.sendDirect({ recipientId, content })`. `inbox.watch(handler, { consumerId, checkpointStore })` discovers conversations belonging to the authenticated identity and consumes retained/new events with per-channel checkpoints. It includes new DMs and groups, with polling and explicit limits. See the [direct-message guide](docs/DIRECT_MESSAGES.md) and [runnable responder](examples/dm-responder.mjs). The lower-level channel API below remains available.
 
@@ -65,7 +92,7 @@ The environment-token example is static: it cannot renew an expired token. A lon
 
 Use `require('@humchat/node')` in CommonJS. `getConfig()` returns a credential-free copy; `getCapabilities()` returns normalized server capability metadata. Returned identity and capability objects can be safely modified by the caller without changing the client's bound identity.
 
-`baseUrl` is required until the official production origin is confirmed. It must be an HTTP(S) origin, without credentials, a path, query, or fragment. Use HTTPS for a deployed server. An `apiKey` configuration is rejected with `UnsupportedFeatureError`: no verified machine-token exchange is implemented.
+`baseUrl` is required so each client explicitly chooses its HumChat server. It must be an HTTP(S) origin, without credentials, a path, query, or fragment. Use HTTPS for a deployed server. Top-level `apiKey` is rejected with `UnsupportedFeatureError`; delegated member login uses the separate `auth` configuration above.
 
 ## Durable consumption and restart recovery
 
@@ -173,7 +200,7 @@ The following snapshot recovery behavior applies only to explicit `recovery: { m
 
 The SDK opens the socket before scanning history v2, buffers live frames, reconciles root messages and recently known threads, refreshes bounded cached states, and drains buffered events. Reconnect can emit inferred new creations with `source: 'recovery', replayed: true`; snapshots use `stateReconciled` rather than inventing historical mutation events. Duplicate filtering and revision tracking are bounded and process-local. Older unknown threads, mutations outside scanned/cached state, late commits behind a watermark, cache eviction, and process restarts can cause gaps or repeat observations. This is not a durable event stream or an exactly-once consumer.
 
-Transport outages and HTTP upgrade 408/429/502/503/504 retry with exponential full jitter; reconnect continues until closed or blocked. Retry-After is honored. A stable connection resets the backoff after 30 seconds. Ping/pong detects half-open sockets. One failed 401 upgrade may refresh; repeated 401 and channel 403/404 stop that channel. Verified replacement tokens must retain the bound actor and organization. A changed token rotates affected sockets through the connection limit; the old socket closes before its replacement, so that gap uses the same limited recovery. Explicit `session_revoked` blocks every subscription and future work on that client; it never silently reconnects around revocation.
+Transport outages and HTTP upgrade 408/429/502/503/504 retry with exponential full jitter; reconnect continues until closed or blocked. Retry-After is honored. A stable connection resets the backoff after 30 seconds. Ping/pong detects half-open sockets. One failed 401 upgrade may refresh; repeated 401 and channel 403/404 stop that channel. Verified replacement tokens must retain the bound actor and organization. A changed token rotates affected sockets through the connection limit; the old socket closes before its replacement, so that gap uses the selected recovery mode. A `session_revoked` frame is terminal unless it carries exactly `code: "TOKEN_EXPIRED"` and that code was advertised by the verified session's capabilities. Only that negotiated expiry invalidates the old token and reconnects through normal verified acquisition. Reason text and local clock proximity never authorize renewal.
 
 | Setting | Default / scope |
 | --- | --- |
@@ -230,7 +257,7 @@ npm ci
 npm test
 ```
 
-`npm test` builds and typechecks the SDK, then runs unit, controlled-peer integration, release-policy and installed-package tests. These tests use synthetic identities and local HTTP/WebSocket peers; they do not require production credentials or a server checkout. Real Rust/PostgreSQL end-to-end tests and their local server harness remain in the upstream HumChat server repository and are not included here.
+`npm test` builds and typechecks the SDK, then runs unit, controlled-peer integration, release-policy and installed-package tests. These tests use synthetic identities and local HTTP/WebSocket peers; they do not require production credentials or a server checkout. The historical Rust/PostgreSQL SDK harness was removed from current upstream server main; a maintained real-server fixture remains separate follow-up work. This repository does not start a Rust server or PostgreSQL.
 
 Runnable examples include `send.mjs`, `list-channels.mjs`, `react.mjs`, `thread-responder.mjs` (best effort) and `durable-responder.mjs` (checkpoint/outbox), all under `examples/`. Set `HUMCHAT_BASE_URL`, `HUMCHAT_ORG_ID`, `HUMCHAT_TOKEN`, and the channel/message variables documented in each. The durable responder also requires `HUMCHAT_STATE_DIR`. The environment-token examples cannot renew credentials: implement a refreshing provider for a long-running deployment.
 

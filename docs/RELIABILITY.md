@@ -2,7 +2,7 @@
 
 The default mode consumes a retained, ordered event log. With an acknowledged consumer and a durable checkpoint adapter, delivery is at least once while its cursor remains retained. Application side effects are not exactly once: a process can finish a side effect and crash before recording its input checkpoint.
 
-This alpha includes package and controlled-peer fault tests. Production machine authentication, staging acceptance, a production-sized workload and the agreed 24-hour pilot remain **unverified**. Passing local tests is not a capacity guarantee. See [Authentication](AUTHENTICATION.md) for the credential contract and [API](API.md) for exact signatures.
+This alpha includes package and controlled-peer fault tests. Production deployment acceptance, representative workload tests and a sustained pilot remain **unverified**. Passing local tests is not a capacity guarantee. See [Authentication](AUTHENTICATION.md) for the credential contract and [API](API.md) for exact signatures.
 
 ## Choose a recovery mode
 
@@ -108,6 +108,12 @@ Durable mode negotiates a ready watermark on the WebSocket and reads bounded HTT
 `recoveryComplete` with `mode: 'durable', complete: true, cursor` means that captured watermark was processed. It does not promise future delivery, pre-migration history, or availability after retention expires. `ready` resolves after initial recovery and deliveries complete; install listeners and `consume()` before waiting for it. `resync()` schedules work and can be called inside a handler; its returned promise is not an attempt-completion signal.
 
 Transient network failures and WebSocket HTTP upgrade 408/429/502/503/504 retry using exponential full jitter and Retry-After. Reconnect continues until closed or blocked; the HTTP `maxRetries` setting is not a reconnect limit. A connection stable for 30 seconds resets the backoff. Ping/pong detects dead sockets. One failed 401 handshake can refresh; repeated denial or channel 403/404 blocks the channel. Changed credentials rotate sockets after same-principal verification. Explicit revocation ends the entire client's credential lifecycle.
+
+Native SDK-key authentication uses the same shared acquisition for HTTP and every socket. Scheduled renewal failures that remain retryable enter reconnect backoff; permanent mint 401/403 is latched for the client. Actual revocation aborts pending renewal, so a late response cannot publish a replacement identity or open sockets. Network disconnect alone reuses a still-valid cached token.
+
+Retryable SDK-key acquisition failures retain a client-wide cooldown after the failed promise settles. All later callers share one delayed acquisition: 1–2 seconds initially, doubling up to 15–30 seconds, with a longer `Retry-After` taking precedence. Verification failures at `/me` or capabilities also count. Full verified success resets the delay; a deadline spent waiting does not extend it. HTTP retries inside one acquisition retain their configured limits. This bounds repeated acquisition pressure within a client, not the total request rate across an application's processes. Validate concurrency and request rates against your deployment before increasing the default channel limits.
+
+A server may advertise `authentication.socket_session_end_codes: ["TOKEN_EXPIRED"]`. Only with that capability does `{ "type": "session_revoked", "code": "TOKEN_EXPIRED", "reason": "session expired" }` permit verified renewal. Missing, unknown or unadvertised codes remain terminal, regardless of reason text or local expiry estimates. Servers without this capability use proactive renewal and ordinary reconnect. Durable channel/multiplex recovery resumes from committed checkpoints across token rotation, subject to retention and the normal at-least-once guarantees.
 
 ## Writes and uncertain outcomes
 

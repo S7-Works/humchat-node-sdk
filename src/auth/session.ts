@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { ResolvedConfig, TokenProviderContext, TokenResult } from '../config.js';
+import { normalizeEmail, type ResolvedConfig, type SdkKeyAuthOptions, type TokenProviderContext, type TokenResult } from '../config.js';
 import type { Identity } from '../types.js';
-import { AuthenticationError, NotFoundError, ProtocolError, SessionRevokedError, UnsupportedFeatureError } from '../errors.js';
-import { aborted, budget, HttpTransport, raceSignal } from '../http/transport.js';
+import { AuthenticationError, HumChatError, NotFoundError, PermissionError, ProtocolError, SessionRevokedError, UnsupportedFeatureError } from '../errors.js';
+import { aborted, budget, delay, HttpTransport, raceSignal } from '../http/transport.js';
 
 const safeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const identitySchema = z.object({
@@ -15,6 +15,8 @@ const capabilitiesSchema = z.object({
   authentication: z.object({
     user_sessions: z.boolean(), service_identities: z.boolean(), api_key_exchange: z.boolean(),
     app_binding_required: z.boolean(), mock_authentication: z.boolean(),
+    sdk_key_user_tokens: z.object({ endpoint: z.string(), key_header: z.string(), configured: z.boolean() }).optional(),
+    socket_session_end_codes: z.array(z.string()).optional(),
   }),
   messaging: z.object({
     send_receipt_versions: z.array(safeInteger), message_state_versions: z.array(safeInteger),
@@ -29,6 +31,8 @@ export interface SdkCapabilities {
   authentication: {
     userSessions: boolean; serviceIdentities: boolean; apiKeyExchange: boolean;
     appBindingRequired: boolean; mockAuthentication: boolean;
+    sdkKeyUserTokens: { endpoint: string; keyHeader: string; configured: boolean } | null;
+    socketSessionEndCodes: string[];
   };
   messaging: {
     sendReceiptVersions: number[]; messageStateVersions: number[]; historyVersions: number[];
@@ -51,9 +55,17 @@ export class SessionManager {
   #current: VerifiedSession | undefined;
   #pending: Promise<VerifiedSession> | undefined;
   #bound: { actorId: string; orgId: string } | undefined;
-  #blocked: AuthenticationError | SessionRevokedError | undefined;
+  #blocked: AuthenticationError | PermissionError | SessionRevokedError | undefined;
+  #expired: VerifiedSession | undefined;
+  #revoked = new AbortController();
   #listeners = new Set<(session: VerifiedSession) => void>();
-  constructor(private readonly config: ResolvedConfig, private readonly http: HttpTransport, private readonly closed: AbortSignal) {}
+  #sdkKeyAuth: Readonly<SdkKeyAuthOptions> | undefined;
+  #acquisitionFailures = 0;
+  #retryAt = 0;
+  constructor(private readonly config: ResolvedConfig, private readonly http: HttpTransport, private readonly closed: AbortSignal,
+    sdkKeyAuth?: Readonly<SdkKeyAuthOptions>) {
+    this.#sdkKeyAuth = sdkKeyAuth;
+  }
 
   getActorId(): string {
     if (!this.#bound) throw new ProtocolError('No verified actor is bound to this client');
@@ -66,6 +78,12 @@ export class SessionManager {
   revoke(): void {
     this.#blocked = new SessionRevokedError('Session ended; create a new client with a new credential lifecycle');
     this.#current = undefined;
+    this.#revoked.abort(this.#blocked);
+  }
+
+  /** Only a negotiated explicit expiry signal may invalidate a still-cached token. */
+  expire(previous: VerifiedSession): void {
+    if (this.#current === previous) this.#expired = previous;
   }
 
   async get(signal: AbortSignal): Promise<VerifiedSession> {
@@ -73,7 +91,7 @@ export class SessionManager {
     if (this.#blocked) throw this.#blocked;
     if (this.#pending) return raceSignal(this.#pending, signal);
     if (!this.#current) return this.refresh('initial', signal);
-    if (this.#current.refreshAt !== null && Date.now() / 1_000 >= this.#current.refreshAt) return this.refresh('expiring', signal);
+    if (this.#expired === this.#current || (this.#current.refreshAt !== null && Date.now() / 1_000 >= this.#current.refreshAt)) return this.refresh('expiring', signal);
     return this.#current;
   }
 
@@ -95,15 +113,37 @@ export class SessionManager {
   }
 
   private async acquire(reason: TokenProviderContext['reason']): Promise<VerifiedSession> {
-    const lifetime = budget(this.config.retry.totalTimeoutMs, [this.closed]);
+    const lifetime = budget(this.config.retry.totalTimeoutMs, [this.closed, this.#revoked.signal]);
+    let attempted = false;
     try {
+      // A completed failure must not let every channel start another mint. Keep
+      // the wait inside the shared flight and deadline, independent of callers.
+      if (this.#sdkKeyAuth && this.#retryAt > Date.now()) await delay(this.#retryAt - Date.now(), lifetime.signal);
+      if (lifetime.signal.aborted) throw aborted(lifetime.signal);
+      attempted = true;
       const context: TokenProviderContext = { reason, signal: lifetime.signal };
       if (this.#current) context.previous = { expiresAt: this.#current.expiresAt };
       let supplied: TokenResult;
-      try { supplied = await raceSignal(Promise.resolve().then(() => this.config.tokenProvider(context)), lifetime.signal); }
-      catch (error) {
-        if (lifetime.signal.aborted) throw aborted(lifetime.signal);
-        throw new AuthenticationError('Token provider failed');
+      if (this.config.authentication === 'sdkKey') {
+        if (!this.#sdkKeyAuth) throw new AuthenticationError('SDK-key credentials are unavailable');
+        try { supplied = await this.http.mintSdkKey(this.#sdkKeyAuth, lifetime.signal); }
+        catch (error) {
+          // A revoked key or denied delegated member cannot recover by retrying the
+          // same immutable credentials from every channel or subsequent HTTP call.
+          if ((error instanceof AuthenticationError && error.status === 401) ||
+              (error instanceof PermissionError && error.status === 403)) {
+            this.#blocked = error;
+            this.#current = undefined;
+          }
+          throw error;
+        }
+      } else {
+        const tokenProvider = this.config.tokenProvider;
+        try { supplied = await raceSignal(Promise.resolve().then(() => tokenProvider(context)), lifetime.signal); }
+        catch {
+          if (lifetime.signal.aborted) throw aborted(lifetime.signal);
+          throw new AuthenticationError('Token provider failed');
+        }
       }
       if (!supplied || typeof supplied.token !== 'string' || !supplied.token || /\s|[\x00-\x1f\x7f]/.test(supplied.token)) {
         throw new AuthenticationError('Token provider returned an invalid token');
@@ -114,7 +154,8 @@ export class SessionManager {
       const me = identitySchema.safeParse(await this.http.request('/me', supplied.token, {}, lifetime.signal));
       if (!me.success) throw new ProtocolError('Invalid identity response');
       const raw = me.data;
-      if (raw.org !== this.config.orgId || (this.#bound && (this.#bound.actorId !== raw.user_uuid || this.#bound.orgId !== raw.org))) {
+      if (raw.org !== this.config.orgId || (this.#sdkKeyAuth && normalizeEmail(raw.email) !== this.#sdkKeyAuth.actAs) ||
+          (this.#bound && (this.#bound.actorId !== raw.user_uuid || this.#bound.orgId !== raw.org))) {
         this.#blocked = new AuthenticationError('Identity changed or does not match the configured organization; create a new client');
         this.#current = undefined;
         throw this.#blocked;
@@ -128,12 +169,22 @@ export class SessionManager {
       const parsed = capabilitiesSchema.safeParse(capabilitiesRaw);
       if (!parsed.success) throw new ProtocolError('Invalid SDK capability response');
       const cap = parsed.data;
+      const sdkKeyCapability = cap.authentication.sdk_key_user_tokens;
+      if (this.#sdkKeyAuth) {
+        if (!sdkKeyCapability || !sdkKeyCapability.configured) {
+          throw new UnsupportedFeatureError('Server SDK-key login is not configured');
+        }
+        if (sdkKeyCapability.endpoint !== '/api/sdk/auth/user-token' || sdkKeyCapability.key_header.toLowerCase() !== 'x-humchat-sdk-key') {
+          throw new ProtocolError('Server advertised an unsupported SDK-key login contract');
+        }
+      }
       if (!cap.messaging.send_receipt_versions.includes(1) || !cap.messaging.message_state_versions.includes(1) || !cap.messaging.history_versions.includes(2)) {
         throw new UnsupportedFeatureError('Server lacks the required send v1, state v1, or history v2 protocol');
       }
       const expiryCandidates = [supplied.expiresAt, raw.expires_at].filter((value): value is number => typeof value === 'number');
       const expiresAt = expiryCandidates.length ? Math.min(...expiryCandidates) : null;
       const now = Date.now() / 1_000;
+      if (lifetime.signal.aborted) throw aborted(lifetime.signal);
       if (this.#blocked) throw this.#blocked;
       if (expiresAt !== null && expiresAt <= now) throw new AuthenticationError('Verified session is expired');
       const identity: Identity = {
@@ -146,6 +197,9 @@ export class SessionManager {
           userSessions: cap.authentication.user_sessions, serviceIdentities: cap.authentication.service_identities,
           apiKeyExchange: cap.authentication.api_key_exchange, appBindingRequired: cap.authentication.app_binding_required,
           mockAuthentication: cap.authentication.mock_authentication,
+          sdkKeyUserTokens: sdkKeyCapability ? { endpoint: sdkKeyCapability.endpoint, keyHeader: sdkKeyCapability.key_header,
+            configured: sdkKeyCapability.configured } : null,
+          socketSessionEndCodes: cap.authentication.socket_session_end_codes ?? [],
         },
         messaging: {
           sendReceiptVersions: cap.messaging.send_receipt_versions, messageStateVersions: cap.messaging.message_state_versions,
@@ -158,10 +212,24 @@ export class SessionManager {
         },
       };
       this.#bound = { actorId: identity.actorId, orgId: identity.orgId };
+      this.#expired = undefined;
       this.#current = { token: supplied.token, identity, expiresAt,
         refreshAt: expiresAt === null ? null : expiresAt - Math.min(60, (expiresAt - now) / 2), capabilities };
+      this.#acquisitionFailures = 0;
+      this.#retryAt = 0;
       for (const listener of this.#listeners) listener(this.#current);
       return this.#current;
+    } catch (error) {
+      if (this.#sdkKeyAuth && attempted && error instanceof HumChatError && error.retryable &&
+          !this.closed.aborted && !this.#revoked.signal.aborted) {
+        this.#acquisitionFailures = Math.min(this.#acquisitionFailures + 1, 5);
+        const ceiling = Math.min(30_000, 2_000 * 2 ** (this.#acquisitionFailures - 1));
+        // Equal jitter retains a one-second floor even with zero HTTP retry
+        // delays. Retry-After may extend this client-wide acquisition backoff.
+        const backoff = Math.floor(ceiling * (0.5 + Math.random() / 2));
+        this.#retryAt = Date.now() + Math.max(backoff, error.retryAfterMs ?? 0);
+      }
+      throw error;
     } finally { lifetime.dispose(); }
   }
 }

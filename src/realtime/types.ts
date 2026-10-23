@@ -59,4 +59,5 @@ export type ParsedFrame =
   | { kind: 'callInvite'; payload: CallInviteEvent }
   | { kind: 'resync' }
   | { kind: 'sessionRevoked'; reason: string }
+  | { kind: 'sessionExpired' }
   | { kind: 'unknown'; type: string };

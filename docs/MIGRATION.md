@@ -10,8 +10,10 @@ Pin an exact tarball/version and test the installed package before rollout. Thes
 | `0.1.0-alpha.1` | Per-channel subscriptions and explicitly selected best-effort history/state recovery. No durable consumer/checkpoint contract. |
 | `0.1.0-alpha.2` | Durable recovery becomes the default on an upgraded server. Adds event paging, `consume()`, checkpoints, outbox and explicit gap errors. |
 | `0.1.0-alpha.3` | Prevents overlapping acknowledged invocations across reconnect, releases durable handshake slots before replay, and preserves permanent handshake denials. Server authorization is rechecked after database waits. |
+| `0.1.0-alpha.7` | Adds member lookup, direct-message helpers and a managed conversation inbox. |
+| `0.1.0-alpha.8` | Local review preview: adds native HumChat SDK-key login, renewal, shared outage backoff and capability-gated socket expiry recovery. Unpublished; production message/app and server acceptance gates remain open. |
 
-Alpha.4 adds guides/release tooling without runtime changes. Alpha.5 adds opt-in [multiplex transport](MULTIPLEX.md), with the existing per-channel transport still the default. These changes do not imply a production authentication or publishing milestone. Check their changelog before assuming a runtime/API change. Service/API-key authentication remains pending across the versions above.
+Alpha.4 adds guides/release tooling without runtime changes. Alpha.5 adds opt-in [multiplex transport](MULTIPLEX.md), with the existing per-channel transport still the default. These changes do not imply a production authentication or publishing milestone. Check their changelog before assuming a runtime/API change. Native SDK-key authentication first appears in the alpha.8 preview described below; earlier versions require a caller-supplied token.
 
 ## HTTP-only applications
 
@@ -56,8 +58,37 @@ A denied WebSocket handshake remains a denial, even if transport error/close eve
 
 Alpha.0/alpha.1 have no durable checkpoint/outbox consumer contract. Rolling back to them is not a transparent resume from alpha.2+ state. Preserve checkpoint/outbox files and reconcile effects before selecting a different recovery mode or consumer ID. Never run old and new file-store owners concurrently or delete a lock while its owner can still run.
 
-The SDK supplies no automatic checkpoint reset, gap repair, store archival or distributed lease migration. Those operations require application ownership and a deliberate data-recovery decision. Public npm access, license/support arrangements, production service credentials and M1/M5 external acceptance remain pending.
+The SDK supplies no automatic checkpoint reset, gap repair, store archival or distributed lease migration. Those operations require application ownership and a deliberate data-recovery decision. Public npm access, license/support arrangements, production message/app acceptance, server authorization/expiry work and the independent pilot remain pending.
 
 ## Alpha.5 to alpha.6
 
 Webhook resources and verification helpers are additive. Existing channel and multiplex clients, checkpoints and outbox files need no format migration. Servers advertise the optional webhook capability only with PostgreSQL webhook tables and a configured encryption key. The server runs the additive migration at startup. See [Webhooks](WEBHOOKS.md) before enabling outgoing delivery; existing sessions and channel grants do not automatically create subscriptions.
+
+## Alpha.7 to alpha.8: delegated member login
+
+Existing `tokenProvider` applications can keep their current configuration. To let the SDK obtain and renew a member token, replace that property with `auth`:
+
+```ts
+import { HumChat } from '@humchat/node';
+
+const humchat = new HumChat({
+  orgId: process.env.HUMCHAT_ORG_ID!,
+  baseUrl: process.env.HUMCHAT_BASE_URL!,
+  auth: {
+    sdkKey: process.env.HUMCHAT_SDK_KEY!,
+    actAs: process.env.HUMCHAT_ACT_AS!,
+  },
+});
+```
+
+An organization administrator obtains the key in HumChat. The SDK sends it only to that HumChat server's user-token endpoint, then uses the verified member's Bearer token for messaging and sockets. There is no direct identity-provider configuration or client credential exchange. Top-level `apiKey` still raises `UnsupportedFeatureError`.
+
+Choose exactly one of `auth` and `tokenProvider`; omit the unused property entirely, including an explicitly undefined property. Native mode requires a UUID organization ID, an `hsk_` key, a valid member email and HTTPS outside literal loopback development hosts. It refuses browser execution. Existing token-provider mode retains opaque organization IDs for supported mock/provider environments. See [authentication](AUTHENTICATION.md) for validation and error handling.
+
+The SDK caches and renews a verified session, shares acquisition across HTTP calls and sockets, and adds a shared cooldown after retryable native login failures. A native mint 401 or 403 blocks that client: correct credentials or access, then create a new client. Revocation remains terminal. Only an explicitly advertised `TOKEN_EXPIRED` socket code allows reactive renewal; an unknown or unadvertised `session_revoked` frame never becomes an automatic retry. Timer-based proactive renewal works independently of that server extension.
+
+The authentication switch needs no checkpoint or outbox file conversion. Resume an existing consumer only when base URL, organization, verified actor and consumer ID remain the same. Switching `actAs` changes the actor and therefore its checkpoint scope; do not copy another member's cursors. Stop and settle the old client before a replacement takes ownership of its stores. Outbox intent IDs and idempotency keys must remain stable when retrying uncertain sends.
+
+Member lookup, `messages.sendDirect()` and `inbox.watch()` retain their alpha.7 APIs. Messages are sent as the verified member and incoming messages are limited to conversations that member can access. Native-auth roundtrip tests pass against synthetic peers; the designated production recipient and visual app check remain outstanding. See [direct messaging](DIRECT_MESSAGES.md) and [live acceptance](SDK_KEY_MESSAGE_ACCEPTANCE.md).
+
+Keep delegated credentials on messaging, channel, history and socket operations. The server's delegated-admin enforcement gap is still open; client configuration cannot enforce that boundary. The separate server expiry companion also needs build and deployment acceptance. Alpha.8 is a local review package, not a production acceptance or npm publication milestone. See [release gates](RELEASING.md).

@@ -1,7 +1,7 @@
 export { HumChat } from './humchat.js';
 export { InboxWatch } from './resources/inbox.js';
 export type { InboxWatchOptions, InboxStatus, InboxStats } from './resources/inbox.js';
-export type { HumChatOptions, SafeConfig, RetryOptions, RealtimeOptions, RecoveryOptions, TokenProvider, TokenProviderContext, TokenResult } from './config.js';
+export type { HumChatOptions, SdkKeyAuthOptions, SafeConfig, RetryOptions, RealtimeOptions, RecoveryOptions, TokenProvider, TokenProviderContext, TokenResult } from './config.js';
 export { ChannelSubscription } from './realtime/subscription.js';
 export type { EventListener } from './realtime/subscription.js';
 export type { RealtimeStats, SubscriptionResult } from './realtime/manager.js';

@@ -38,7 +38,10 @@ export function validatePackFiles(files) {
         path.split('/').some(part => part === '..' || part.startsWith('.')) || seen.has(path)) {
       throw new Error('Unsafe or duplicate packed path');
     }
-    if (!/^(?:package\.json|README\.md|CHANGELOG\.md|LICENSE|dist\/index\.(?:js|cjs|d\.ts|d\.cts)|docs\/[A-Z][A-Z_]*\.md|examples\/(?:README\.md|[a-z][a-z0-9-]*\.(?:mjs|cjs)))$/.test(path)) {
+    if (/^docs\/SDK_KEY_AUTH_(?:CONTRACT|PHASE[0-9]+_REPORT)\.md$/.test(path)) {
+      throw new Error('Internal documentation cannot be included in the package');
+    }
+    if (!/^(?:package\.json|README\.md|CHANGELOG\.md|LICENSE|dist\/index\.(?:js|cjs|d\.ts|d\.cts)|docs\/[A-Z][A-Z0-9_]*\.md|examples\/(?:README\.md|[a-z][a-z0-9-]*\.(?:mjs|cjs)))$/.test(path)) {
       throw new Error('Unexpected packed file: ' + path);
     }
     if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > 2 * 1024 * 1024) throw new Error('Invalid packed file size');
@@ -50,7 +53,10 @@ export function validatePackFiles(files) {
 
 export function inspectText(path, text) {
   // Known credential shapes and signing-key material, not a general secret detector.
+  // HumChat currently generates 43 base64url characters after hsk_. A 32-character
+  // floor also catches nearby opaque formats without rejecting the documented prefix.
   if (/bb_live_(?:sk|cid)_[a-f0-9]{16,}/i.test(text) ||
+      /hsk_[A-Za-z0-9_-]{32,}/.test(text) ||
       /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(text) ||
       /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/.test(text) ||
       /npm_[a-zA-Z0-9]{30,}/.test(text)) throw new Error('Credential-shaped content detected in ' + path);

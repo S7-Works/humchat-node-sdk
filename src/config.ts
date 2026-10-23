@@ -1,4 +1,4 @@
-import { ConfigurationError, UnsupportedFeatureError } from './errors.js';
+import { ConfigurationError, UnsupportedFeatureError, ValidationError } from './errors.js';
 
 export interface TokenResult {
   token: string;
@@ -43,11 +43,17 @@ export interface RecoveryOptions {
   maxStateRefresh?: number;
   timeoutMs?: number;
 }
-export interface HumChatOptions {
+/** Delegated member login through the configured HumChat server. */
+export interface SdkKeyAuthOptions {
+  /** Secret backend credential. Never pass it as a Bearer token. */
+  sdkKey: string;
+  /** Organization member whose identity the server should verify. */
+  actAs: string;
+}
+interface HumChatBaseOptions {
   orgId: string;
-  /** Required during the preview: the official production origin is unverified. */
+  /** Explicit HumChat HTTP(S) origin. SDK-key mode requires HTTPS outside loopback. */
   baseUrl: string;
-  tokenProvider: TokenProvider;
   timeout?: number;
   retry?: RetryOptions;
   realtime?: RealtimeOptions;
@@ -55,6 +61,10 @@ export interface HumChatOptions {
   /** Optional fetch-compatible transport for testing or an application-managed proxy. */
   fetch?: typeof globalThis.fetch;
 }
+export type HumChatOptions = HumChatBaseOptions & (
+  | { tokenProvider: TokenProvider; auth?: never }
+  | { auth: SdkKeyAuthOptions; tokenProvider?: never }
+);
 export interface SafeConfig {
   orgId: string;
   baseUrl: string;
@@ -62,11 +72,51 @@ export interface SafeConfig {
   retry: Required<RetryOptions>;
   realtime: Required<RealtimeOptions>;
   recovery: Required<RecoveryOptions>;
-  authentication: 'tokenProvider';
+  authentication: 'tokenProvider' | 'sdkKey';
 }
-export interface ResolvedConfig extends SafeConfig {
-  tokenProvider: TokenProvider;
+type ResolvedAuthentication =
+  | { authentication: 'tokenProvider'; tokenProvider: TokenProvider }
+  | { authentication: 'sdkKey'; tokenProvider?: never };
+export type ResolvedConfig = Omit<SafeConfig, 'authentication'> & ResolvedAuthentication & {
   fetch: typeof globalThis.fetch;
+};
+
+function validateSdkKeyAuth(value: unknown): Readonly<SdkKeyAuthOptions> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError('auth must contain sdkKey and actAs');
+  }
+  const auth = value as Record<string, unknown>;
+  if (Object.keys(auth).some(key => key !== 'sdkKey' && key !== 'actAs')) {
+    throw new ValidationError('Unknown auth field');
+  }
+  const key = auth.sdkKey;
+  if (typeof key !== 'string' || key.length > 128 || !/^hsk_[A-Za-z0-9_-]+$/.test(key)) {
+    throw new ValidationError('auth.sdkKey must be an hsk_ credential without whitespace or invalid header characters');
+  }
+  const actAs = auth.actAs;
+  if (typeof actAs !== 'string') throw new ValidationError('auth.actAs must be an email address');
+  // Snapshot once; later caller changes must not change the delegated principal.
+  const email = normalizeEmail(actAs);
+  const parts = email.split('@');
+  if (Buffer.byteLength(email, 'utf8') > 254 || /[\s\p{Cc}]/u.test(email) || parts.length !== 2 ||
+      !parts[0] || !parts[1]?.includes('.') || parts[1].split('.').some(label => !label)) {
+    throw new ValidationError('auth.actAs must be an email address');
+  }
+  return Object.freeze({ sdkKey: key, actAs: email });
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().replace(/[A-Z]/g, letter => letter.toLowerCase());
+}
+
+function refuseBrowserSdkKey(): void {
+  const runtime = globalThis as typeof globalThis & {
+    window?: unknown; document?: unknown; WorkerGlobalScope?: unknown; self?: unknown; importScripts?: unknown;
+  };
+  if (runtime.window !== undefined || runtime.document !== undefined || runtime.WorkerGlobalScope !== undefined ||
+      (runtime.self === globalThis && typeof runtime.importScripts === 'function')) {
+    throw new UnsupportedFeatureError('SDK-key authentication is available only in a backend Node.js process');
+  }
 }
 
 function integer(value: unknown, name: string, min: number, max = 2_147_483_647): number {
@@ -76,16 +126,34 @@ function integer(value: unknown, name: string, min: number, max = 2_147_483_647)
   return value;
 }
 
-export function resolveConfig(options: HumChatOptions): ResolvedConfig {
+export function resolveConfig(options: HumChatOptions): { config: ResolvedConfig; sdkKeyAuth?: Readonly<SdkKeyAuthOptions> } {
   if (!options || typeof options !== 'object') throw new ConfigurationError('A configuration object is required');
   const raw = options as unknown as Record<string, unknown>;
-  if ('apiKey' in raw) throw new UnsupportedFeatureError('Machine credential exchange is not supported in this preview; configure tokenProvider');
+  if ('apiKey' in raw) throw new UnsupportedFeatureError('apiKey bot authentication is not supported; use tokenProvider or delegated auth configuration');
+  const sdkKeyMode = 'auth' in raw;
+  if (sdkKeyMode && 'tokenProvider' in raw) throw new ValidationError('Configure either auth or tokenProvider, not both');
   for (const key of Object.keys(raw)) {
-    if (!['orgId', 'baseUrl', 'tokenProvider', 'timeout', 'retry', 'fetch', 'realtime', 'recovery'].includes(key)) {
+    if (!['orgId', 'baseUrl', 'tokenProvider', 'auth', 'timeout', 'retry', 'fetch', 'realtime', 'recovery'].includes(key)) {
       throw new ConfigurationError('Unknown configuration field');
     }
   }
-  if (typeof options.orgId !== 'string' || !options.orgId.trim() || options.orgId !== options.orgId.trim()) {
+  let orgId = options.orgId;
+  let authentication: ResolvedAuthentication;
+  let sdkKeyAuth: Readonly<SdkKeyAuthOptions> | undefined;
+  if (sdkKeyMode) {
+    refuseBrowserSdkKey();
+    sdkKeyAuth = validateSdkKeyAuth(raw.auth);
+    if (typeof orgId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId)) {
+      throw new ValidationError('orgId must be a canonical UUID for SDK-key authentication');
+    }
+    orgId = orgId.toLowerCase();
+    // Secrets travel separately and never enter publicly inspectable resolved config.
+    authentication = { authentication: 'sdkKey' };
+  } else {
+    if (typeof options.tokenProvider !== 'function') throw new ConfigurationError('tokenProvider must be an async function');
+    authentication = { authentication: 'tokenProvider', tokenProvider: options.tokenProvider };
+  }
+  if (typeof orgId !== 'string' || !orgId.trim() || orgId !== orgId.trim()) {
     throw new ConfigurationError('orgId must be a non-empty string without surrounding whitespace');
   }
   if (typeof options.baseUrl !== 'string') throw new ConfigurationError('baseUrl is required during the preview');
@@ -94,7 +162,10 @@ export function resolveConfig(options: HumChatOptions): ResolvedConfig {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw new ConfigurationError('baseUrl must be an HTTP(S) origin without credentials, path, query, or fragment');
   }
-  if (typeof options.tokenProvider !== 'function') throw new ConfigurationError('tokenProvider must be an async function');
+  if (sdkKeyMode && url.protocol !== 'https:' &&
+      !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/i.test(options.baseUrl)) {
+    throw new ConfigurationError('SDK-key authentication requires HTTPS outside literal loopback development origins');
+  }
   if (options.fetch !== undefined && typeof options.fetch !== 'function') throw new ConfigurationError('fetch must be a function');
   if (options.retry !== undefined && (!options.retry || typeof options.retry !== 'object' || Array.isArray(options.retry))) {
     throw new ConfigurationError('retry must be an object');
@@ -137,9 +208,10 @@ export function resolveConfig(options: HumChatOptions): ResolvedConfig {
     maxStateRefresh: integer(options.recovery?.maxStateRefresh ?? recoveryDefaults.maxStateRefresh, 'recovery.maxStateRefresh', 0, 10_000),
     timeoutMs: integer(options.recovery?.timeoutMs ?? recoveryDefaults.timeoutMs, 'recovery.timeoutMs', 1),
   };
-  return {
-    orgId: options.orgId, baseUrl: url.origin, timeout: integer(options.timeout ?? 10_000, 'timeout', 1),
-    retry, realtime, recovery, authentication: 'tokenProvider', tokenProvider: options.tokenProvider,
+  const config: ResolvedConfig = {
+    orgId, baseUrl: url.origin, timeout: integer(options.timeout ?? 10_000, 'timeout', 1),
+    retry, realtime, recovery, ...authentication,
     fetch: options.fetch ?? globalThis.fetch,
   };
+  return { config, ...(sdkKeyAuth ? { sdkKeyAuth } : {}) };
 }
